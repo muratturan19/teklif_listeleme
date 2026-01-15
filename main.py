@@ -304,6 +304,12 @@ def render_folder_panel() -> None:
     st.caption(
         "Seçilen klasörün içindeki firma klasörlerinde sadece 'Teklifler' alt klasörü taranır."
     )
+
+    def choose_scan_folder() -> None:
+        selected = pick_folder()
+        if selected:
+            st.session_state.scan_folder_path = selected
+
     if "scan_folder_path" not in st.session_state:
         st.session_state.scan_folder_path = ""
     input_col, browse_col = st.columns([4, 1])
@@ -313,11 +319,7 @@ def render_folder_panel() -> None:
             key="scan_folder_path",
         )
     with browse_col:
-        if st.button("Gözat"):
-            selected = pick_folder()
-            if selected:
-                st.session_state.scan_folder_path = selected
-                st.rerun()
+        st.button("Gözat", on_click=choose_scan_folder)
     folder = st.session_state.scan_folder_path
     if st.button("Klasörü Tara"):
         if not folder:
