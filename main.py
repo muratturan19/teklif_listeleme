@@ -81,7 +81,10 @@ def extract_amount(text: str) -> tuple[float | None, str | None]:
         if match:
             raw_amount = match.group(1).strip()
             currency = match.group(2) if match.lastindex and match.lastindex >= 2 else None
-            normalized = raw_amount.replace(".", "").replace(",", ".")
+            normalized = raw_amount.replace(",", ".")
+            if normalized.count(".") > 1:
+                parts = normalized.split(".")
+                normalized = "".join(parts[:-1]) + "." + parts[-1]
             try:
                 return float(normalized), currency
             except ValueError:
