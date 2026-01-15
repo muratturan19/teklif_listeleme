@@ -16,8 +16,9 @@ LOG_PATH = "teklif_listeleme.log"
 
 FIRM_PATTERNS = [
     re.compile(r"(?:Firma|Şirket|Müşteri)\s*[:\-]\s*(.+)", re.IGNORECASE),
-    re.compile(r"Sayın\s+(.+)", re.IGNORECASE),
 ]
+
+GREETINGS_PATTERN = re.compile(r"Sayın\s+(.+)", re.IGNORECASE)
 
 SUBJECT_PATTERNS = [
     re.compile(r"Konu\s*[:\-]\s*(.+)", re.IGNORECASE),
@@ -67,12 +68,25 @@ def init_db() -> None:
 
 def extract_text_from_pdf(path: str) -> str:
     reader = PdfReader(path)
-    chunks = []
+    chunks: list[str] = []
     for page in reader.pages:
-        text = page.extract_text() or ""
+        text = sanitize_text(page.extract_text() or "")
         if text.strip():
             chunks.append(text)
     return "\n".join(chunks)
+
+
+def extract_pages_from_pdf(path: str) -> list[str]:
+    reader = PdfReader(path)
+    chunks: list[str] = []
+    for page in reader.pages:
+        text = sanitize_text(page.extract_text() or "")
+        chunks.append(text)
+    return chunks
+
+
+def sanitize_text(value: str) -> str:
+    return value.encode("utf-8", "replace").decode("utf-8")
 
 
 def extract_field(patterns: list[re.Pattern], text: str) -> str:
@@ -85,28 +99,65 @@ def extract_field(patterns: list[re.Pattern], text: str) -> str:
     return ""
 
 
-def extract_amount(text: str) -> tuple[float | None, str | None]:
+def extract_firm(pages_text: list[str]) -> str:
+    if not pages_text:
+        return ""
+    first_page = pages_text[0]
+    lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+    header_block = "\n".join(lines[:12])
+    firm = extract_field(FIRM_PATTERNS, header_block)
+    if firm:
+        return firm
+    for line in lines[:15]:
+        match = GREETINGS_PATTERN.search(line)
+        if not match:
+            continue
+        candidate = match.group(1).strip()
+        if re.search(r"\b(hanım|bey)\b", candidate, re.IGNORECASE):
+            continue
+        return candidate
+    return ""
+
+
+def extract_subject(pages_text: list[str]) -> str:
+    if not pages_text:
+        return ""
+    first_page = pages_text[0]
+    lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+    header_block = "\n".join(lines[:18])
+    return extract_field(SUBJECT_PATTERNS, header_block)
+
+
+def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, str | None]:
+    normalized = raw_amount.replace(",", ".")
+    if normalized.count(".") > 1:
+        parts = normalized.split(".")
+        normalized = "".join(parts[:-1]) + "." + parts[-1]
+    try:
+        return float(normalized), currency
+    except ValueError:
+        return None, None
+
+
+def extract_amount_from_pages(pages_text: list[str]) -> tuple[float | None, str | None]:
     for pattern in AMOUNT_PATTERNS:
-        match = pattern.search(text)
-        if match:
+        for page_text in pages_text:
+            match = pattern.search(page_text)
+            if not match:
+                continue
             raw_amount = match.group(1).strip()
             currency = match.group(2) if match.lastindex and match.lastindex >= 2 else None
-            normalized = raw_amount.replace(",", ".")
-            if normalized.count(".") > 1:
-                parts = normalized.split(".")
-                normalized = "".join(parts[:-1]) + "." + parts[-1]
-            try:
-                return float(normalized), currency
-            except ValueError:
-                continue
+            amount, normalized_currency = parse_amount(raw_amount, currency)
+            if amount is not None:
+                return amount, normalized_currency
     return None, None
 
 
 def parse_offer(path: str) -> OfferRecord:
-    text = extract_text_from_pdf(path)
-    firm = extract_field(FIRM_PATTERNS, text)
-    subject = extract_field(SUBJECT_PATTERNS, text)
-    amount, currency = extract_amount(text)
+    pages_text = extract_pages_from_pdf(path)
+    firm = extract_firm(pages_text)
+    subject = extract_subject(pages_text)
+    amount, currency = extract_amount_from_pages(pages_text)
     return OfferRecord(
         file_path=path,
         firm=firm,
@@ -172,15 +223,51 @@ class OfferApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("Teklif Listeleme")
-        self.geometry("900x600")
+        self.geometry("1040x680")
+        self.minsize(960, 640)
+        self.configure(bg="#f5f6f8")
 
         self._build_ui()
         init_db()
         self.refresh_table()
 
     def _build_ui(self) -> None:
-        top_frame = ttk.Frame(self)
-        top_frame.pack(fill="x", padx=12, pady=8)
+        style = ttk.Style(self)
+        if "clam" in style.theme_names():
+            style.theme_use("clam")
+        style.configure("TFrame", background="#f5f6f8")
+        style.configure("Header.TLabel", font=("Segoe UI", 18, "bold"), background="#f5f6f8")
+        style.configure("SubHeader.TLabel", font=("Segoe UI", 10), foreground="#5f6b7a", background="#f5f6f8")
+        style.configure("Toolbar.TFrame", background="#f5f6f8")
+        style.configure("TButton", font=("Segoe UI", 10), padding=6)
+        style.configure(
+            "Treeview",
+            font=("Segoe UI", 10),
+            rowheight=28,
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=("Segoe UI", 10, "bold"),
+            background="#e3e7ed",
+        )
+        style.map("Treeview.Heading", background=[("active", "#d9dee6")])
+
+        container = ttk.Frame(self, padding=16)
+        container.pack(fill="both", expand=True)
+
+        header_frame = ttk.Frame(container)
+        header_frame.pack(fill="x")
+        ttk.Label(header_frame, text="Teklif Yönetimi", style="Header.TLabel").pack(
+            anchor="w"
+        )
+        ttk.Label(
+            header_frame,
+            text="PDF teklifleri tarayın, hızlıca özetleyin ve raporlayın.",
+            style="SubHeader.TLabel",
+        ).pack(anchor="w", pady=(2, 12))
+
+        top_frame = ttk.Frame(container, style="Toolbar.TFrame")
+        top_frame.pack(fill="x", pady=(0, 12))
 
         self.buttons: list[ttk.Button] = []
         self.buttons.append(
@@ -208,8 +295,11 @@ class OfferApp(tk.Tk):
             side="left", padx=6
         )
 
+        tree_frame = ttk.Frame(container)
+        tree_frame.pack(fill="both", expand=True)
+
         self.tree = ttk.Treeview(
-            self,
+            tree_frame,
             columns=("firm", "subject", "amount", "currency", "file"),
             show="headings",
         )
@@ -223,11 +313,26 @@ class OfferApp(tk.Tk):
         self.tree.column("amount", width=90, anchor="e")
         self.tree.column("currency", width=90, anchor="center")
         self.tree.column("file", width=300)
-        self.tree.pack(fill="both", expand=True, padx=12, pady=8)
+        self.tree.tag_configure("odd", background="#ffffff")
+        self.tree.tag_configure("even", background="#f1f4f8")
 
+        scrollbar = ttk.Scrollbar(tree_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=scrollbar.set)
+        self.tree.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        tree_frame.columnconfigure(0, weight=1)
+        tree_frame.rowconfigure(0, weight=1)
+
+        status_frame = ttk.Frame(container)
+        status_frame.pack(fill="x", pady=(12, 0))
         self.status_var = tk.StringVar(value="Hazır.")
-        status_bar = ttk.Label(self, textvariable=self.status_var, anchor="w")
-        status_bar.pack(fill="x", padx=12, pady=(0, 8))
+        self.count_var = tk.StringVar(value="Toplam teklif: 0")
+        ttk.Label(status_frame, textvariable=self.status_var, anchor="w").pack(
+            side="left"
+        )
+        ttk.Label(status_frame, textvariable=self.count_var, anchor="e").pack(
+            side="right"
+        )
 
     def add_files(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -300,7 +405,8 @@ class OfferApp(tk.Tk):
                 count += 1
             except Exception as exc:  # noqa: BLE001
                 logging.exception("Dosya işlenemedi: %s", path)
-                errors.append(f"{path} okunamadı: {exc}")
+                error_text = sanitize_text(str(exc))
+                errors.append(f"{path} okunamadı: {error_text}")
         queue_updates.put(("done", count, errors))
 
     def _poll_queue(
@@ -342,13 +448,21 @@ class OfferApp(tk.Tk):
     def refresh_table(self) -> None:
         for item in self.tree.get_children():
             self.tree.delete(item)
-        for record in load_offers():
+        for index, record in enumerate(load_offers()):
             amount_text = "" if record.amount is None else f"{record.amount:,.2f}"
             self.tree.insert(
                 "",
                 "end",
-                values=(record.firm, record.subject, amount_text, record.currency or "", record.file_path),
+                values=(
+                    record.firm,
+                    record.subject,
+                    amount_text,
+                    record.currency or "",
+                    record.file_path,
+                ),
+                tags=("even" if index % 2 == 0 else "odd",),
             )
+        self.count_var.set(f"Toplam teklif: {len(self.tree.get_children())}")
 
     def show_summary(self) -> None:
         summary_window = tk.Toplevel(self)
