@@ -1,6 +1,9 @@
+import logging
 import os
+import queue
 import re
 import sqlite3
+import threading
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
@@ -9,6 +12,7 @@ from tkinter import filedialog, messagebox, ttk
 from PyPDF2 import PdfReader
 
 DB_PATH = "teklifler.db"
+LOG_PATH = "teklif_listeleme.log"
 
 FIRM_PATTERNS = [
     re.compile(r"(?:Firma|Şirket|Müşteri)\s*[:\-]\s*(.+)", re.IGNORECASE),
@@ -27,6 +31,12 @@ AMOUNT_PATTERNS = [
     ),
     re.compile(r"([\d\.\,]+)\s*(TL|₺|USD|EUR)", re.IGNORECASE),
 ]
+
+logging.basicConfig(
+    filename=LOG_PATH,
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 
 
 @dataclass
@@ -172,16 +182,29 @@ class OfferApp(tk.Tk):
         top_frame = ttk.Frame(self)
         top_frame.pack(fill="x", padx=12, pady=8)
 
-        ttk.Button(top_frame, text="PDF Dosyası Ekle", command=self.add_files).pack(
+        self.buttons: list[ttk.Button] = []
+        self.buttons.append(
+            ttk.Button(top_frame, text="PDF Dosyası Ekle", command=self.add_files)
+        )
+        self.buttons[-1].pack(
             side="left", padx=6
         )
-        ttk.Button(top_frame, text="Klasör Tara", command=self.scan_folder).pack(
+        self.buttons.append(
+            ttk.Button(top_frame, text="Klasör Tara", command=self.scan_folder)
+        )
+        self.buttons[-1].pack(
             side="left", padx=6
         )
-        ttk.Button(top_frame, text="Özet Tablo", command=self.show_summary).pack(
+        self.buttons.append(
+            ttk.Button(top_frame, text="Özet Tablo", command=self.show_summary)
+        )
+        self.buttons[-1].pack(
             side="left", padx=6
         )
-        ttk.Button(top_frame, text="Listeyi Yenile", command=self.refresh_table).pack(
+        self.buttons.append(
+            ttk.Button(top_frame, text="Listeyi Yenile", command=self.refresh_table)
+        )
+        self.buttons[-1].pack(
             side="left", padx=6
         )
 
@@ -202,6 +225,10 @@ class OfferApp(tk.Tk):
         self.tree.column("file", width=300)
         self.tree.pack(fill="both", expand=True, padx=12, pady=8)
 
+        self.status_var = tk.StringVar(value="Hazır.")
+        status_bar = ttk.Label(self, textvariable=self.status_var, anchor="w")
+        status_bar.pack(fill="x", padx=12, pady=(0, 8))
+
     def add_files(self) -> None:
         paths = filedialog.askopenfilenames(
             title="Teklif PDF'lerini Seçin", filetypes=[("PDF Files", "*.pdf")]
@@ -221,16 +248,96 @@ class OfferApp(tk.Tk):
         self.process_files(pdf_files)
 
     def process_files(self, paths: list[str]) -> None:
+        if not paths:
+            return
+        self._start_processing(paths)
+
+    def _set_buttons_state(self, state: str) -> None:
+        for button in self.buttons:
+            button.configure(state=state)
+
+    def _start_processing(self, paths: list[str]) -> None:
+        self._set_buttons_state("disabled")
+        self.status_var.set("Dosyalar işleniyor...")
+        progress_window = tk.Toplevel(self)
+        progress_window.title("İşlem Devam Ediyor")
+        progress_window.geometry("480x160")
+        progress_window.resizable(False, False)
+        progress_window.transient(self)
+        progress_window.grab_set()
+
+        label_var = tk.StringVar(value="Dosyalar hazırlanıyor...")
+        ttk.Label(progress_window, textvariable=label_var, anchor="w").pack(
+            fill="x", padx=12, pady=(12, 6)
+        )
+        progress = ttk.Progressbar(
+            progress_window, maximum=len(paths), mode="determinate"
+        )
+        progress.pack(fill="x", padx=12, pady=6)
+
+        queue_updates: queue.Queue[tuple] = queue.Queue()
+        thread = threading.Thread(
+            target=self._process_files_worker, args=(paths, queue_updates), daemon=True
+        )
+        thread.start()
+
+        self._poll_queue(
+            progress_window,
+            label_var,
+            progress,
+            queue_updates,
+        )
+
+    def _process_files_worker(self, paths: list[str], queue_updates: queue.Queue) -> None:
         count = 0
-        for path in paths:
+        errors: list[str] = []
+        total = len(paths)
+        for index, path in enumerate(paths, start=1):
+            queue_updates.put(("progress", index, total, path))
             try:
                 record = parse_offer(path)
                 save_offer(record)
                 count += 1
             except Exception as exc:  # noqa: BLE001
-                messagebox.showwarning("Uyarı", f"{path} okunamadı: {exc}")
-        self.refresh_table()
-        messagebox.showinfo("Tamamlandı", f"{count} teklif işlendi.")
+                logging.exception("Dosya işlenemedi: %s", path)
+                errors.append(f"{path} okunamadı: {exc}")
+        queue_updates.put(("done", count, errors))
+
+    def _poll_queue(
+        self,
+        progress_window: tk.Toplevel,
+        label_var: tk.StringVar,
+        progress: ttk.Progressbar,
+        queue_updates: queue.Queue,
+    ) -> None:
+        try:
+            while True:
+                message = queue_updates.get_nowait()
+                if message[0] == "progress":
+                    _, index, total, path = message
+                    progress["value"] = index
+                    label_var.set(f"{index}/{total} işlendi: {os.path.basename(path)}")
+                elif message[0] == "done":
+                    _, count, errors = message
+                    progress_window.destroy()
+                    self._set_buttons_state("normal")
+                    self.refresh_table()
+                    self.status_var.set(f"{count} teklif işlendi.")
+                    if errors:
+                        messagebox.showwarning(
+                            "Uyarı",
+                            "\n".join(errors),
+                        )
+                    messagebox.showinfo("Tamamlandı", f"{count} teklif işlendi.")
+                    return
+        except queue.Empty:
+            pass
+        self.after(
+            120,
+            lambda: self._poll_queue(
+                progress_window, label_var, progress, queue_updates
+            ),
+        )
 
     def refresh_table(self) -> None:
         for item in self.tree.get_children():
