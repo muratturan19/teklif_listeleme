@@ -2,12 +2,14 @@ import logging
 import os
 import re
 import sqlite3
+import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
 
 import streamlit as st
 from PyPDF2 import PdfReader
+from tkinter import filedialog
 
 DB_PATH = "teklifler.db"
 LOG_PATH = "teklif_listeleme.log"
@@ -302,7 +304,21 @@ def render_folder_panel() -> None:
     st.caption(
         "Seçilen klasörün içindeki firma klasörlerinde sadece 'Teklifler' alt klasörü taranır."
     )
-    folder = st.text_input("Firma klasörlerinin bulunduğu ana klasör yolu")
+    if "scan_folder_path" not in st.session_state:
+        st.session_state.scan_folder_path = ""
+    input_col, browse_col = st.columns([4, 1])
+    with input_col:
+        st.text_input(
+            "Firma klasörlerinin bulunduğu ana klasör yolu",
+            key="scan_folder_path",
+        )
+    with browse_col:
+        if st.button("Gözat"):
+            selected = pick_folder()
+            if selected:
+                st.session_state.scan_folder_path = selected
+                st.rerun()
+    folder = st.session_state.scan_folder_path
     if st.button("Klasörü Tara"):
         if not folder:
             st.info("Lütfen bir klasör yolu girin.")
@@ -370,6 +386,17 @@ def ensure_temp_dir() -> str:
     temp_dir = os.path.join(os.getcwd(), ".streamlit_tmp")
     os.makedirs(temp_dir, exist_ok=True)
     return temp_dir
+
+
+def pick_folder() -> str | None:
+    root = tk.Tk()
+    root.withdraw()
+    root.attributes("-topmost", True)
+    try:
+        folder = filedialog.askdirectory()
+    finally:
+        root.destroy()
+    return folder or None
 
 
 def main() -> None:
