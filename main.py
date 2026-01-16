@@ -297,13 +297,23 @@ def extract_amount_from_pages(pages_text: list[str]) -> tuple[float | None, str 
     return None, None
 
 
-def looks_like_offer(pages_text: list[str], subject: str, amount: float | None) -> bool:
-    # Accept if we found subject OR amount (more lenient)
-    if subject or amount is not None:
-        return True
-    # Otherwise check for "teklif" keyword or reasonable text length
-    full_text = "\n".join(pages_text)
-    return bool(OFFER_KEYWORD_PATTERN.search(full_text)) or len(full_text.strip()) > 100
+def looks_like_offer(firm: str, subject: str, amount: float | None) -> bool:
+    """Check if extracted data looks like a valid offer.
+
+    Requires at least 2 out of 3 fields (firm, subject, amount) to be found.
+    This prevents random PDFs from being classified as offers.
+    """
+    found_fields = 0
+
+    if firm and len(firm) > 2:
+        found_fields += 1
+    if subject and len(subject) > 2:
+        found_fields += 1
+    if amount is not None:
+        found_fields += 1
+
+    # Accept if we found at least 2 out of 3 key fields
+    return found_fields >= 2
 
 
 def parse_offer(path: str) -> OfferRecord | None:
@@ -311,7 +321,7 @@ def parse_offer(path: str) -> OfferRecord | None:
     firm = extract_firm(pages_text)
     subject = extract_subject(pages_text)
     amount, currency = extract_amount_from_pages(pages_text)
-    if not looks_like_offer(pages_text, subject, amount):
+    if not looks_like_offer(firm, subject, amount):
         return None
     return OfferRecord(
         file_path=path,
