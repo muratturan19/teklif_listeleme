@@ -460,6 +460,13 @@ def render_home_page() -> None:
 
     # Folder scanning section
     st.subheader("Klasör Tara")
+
+    # Callback function for folder picker
+    def on_browse_click():
+        selected = pick_folder()
+        if selected:
+            st.session_state.scan_folder_path = selected
+
     if "scan_folder_path" not in st.session_state:
         st.session_state.scan_folder_path = ""
 
@@ -471,11 +478,7 @@ def render_home_page() -> None:
             placeholder="E:/DELTA",
         )
     with col2:
-        if st.button("Gözat"):
-            selected = pick_folder()
-            if selected:
-                st.session_state.scan_folder_path = selected
-                st.rerun()
+        st.button("Gözat", on_click=on_browse_click)
 
     if st.button("📂 Klasörü Tara", type="primary", use_container_width=True):
         folder = st.session_state.scan_folder_path
