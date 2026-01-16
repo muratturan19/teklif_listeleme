@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterable
 
+import pandas as pd
 import streamlit as st
 from PyPDF2 import PdfReader
 from tkinter import filedialog
@@ -291,6 +292,59 @@ def load_summary() -> list[tuple[str, str, float]]:
     return rows
 
 
+def get_offers_dataframe() -> pd.DataFrame:
+    """Get all offers as pandas DataFrame for Excel export"""
+    offers = load_offers()
+    if not offers:
+        return pd.DataFrame()
+
+    data = {
+        "Firma": [o.firm for o in offers],
+        "Konu": [o.subject for o in offers],
+        "Tutar": [o.amount if o.amount is not None else 0 for o in offers],
+        "Para Birimi": [o.currency or "" for o in offers],
+        "Dosya Yolu": [o.file_path for o in offers],
+    }
+    return pd.DataFrame(data)
+
+
+def get_dashboard_stats() -> dict:
+    """Get statistics for dashboard"""
+    with sqlite3.connect(DB_PATH) as conn:
+        total_offers = conn.execute("SELECT COUNT(*) FROM teklifler").fetchone()[0]
+        total_firms = conn.execute("SELECT COUNT(DISTINCT firm) FROM teklifler WHERE firm != ''").fetchone()[0]
+
+        # Amount by currency
+        amounts_by_currency = conn.execute(
+            """
+            SELECT currency, COALESCE(SUM(amount), 0), COUNT(*)
+            FROM teklifler
+            WHERE amount IS NOT NULL
+            GROUP BY currency
+            ORDER BY SUM(amount) DESC
+            """
+        ).fetchall()
+
+        # Top firms by total amount
+        top_firms = conn.execute(
+            """
+            SELECT firm, COALESCE(SUM(amount), 0) as total, COUNT(*) as count
+            FROM teklifler
+            WHERE firm != ''
+            GROUP BY firm
+            ORDER BY total DESC
+            LIMIT 10
+            """
+        ).fetchall()
+
+    return {
+        "total_offers": total_offers,
+        "total_firms": total_firms,
+        "amounts_by_currency": amounts_by_currency,
+        "top_firms": top_firms,
+    }
+
+
 def walk_pdf_files(folder: str) -> list[str]:
     pdf_files: list[str] = []
     for root, _, files in os.walk(folder):
@@ -333,14 +387,12 @@ def scan_company_offer_pdfs(root_folder: str) -> list[str]:
 
 def process_files(
     paths: list[str],
-    debug_mode: bool = False,
     progress_callback: Callable[[float], None] | None = None,
     status_callback: Callable[[str], None] | None = None,
-) -> tuple[int, int, list[str], list[dict]]:
-    processed = 0
-    skipped = 0
+) -> tuple[list[OfferRecord], list[str]]:
+    """Parse PDF files and return list of offers (does NOT save to DB)"""
+    records: list[OfferRecord] = []
     errors: list[str] = []
-    debug_info: list[dict] = []
     total = len(paths)
 
     for index, path in enumerate(paths, start=1):
@@ -348,36 +400,44 @@ def process_files(
             status_callback(f"{index}/{total} • {os.path.basename(path)} işleniyor...")
 
         try:
-            # Parse the offer using existing logic
             record = parse_offer(path)
-
-            # If debug mode, extract additional info for display
-            if debug_mode:
-                pages_text = extract_pages_from_pdf(path)
-                full_text = "\n".join(pages_text)
-                debug_info.append({
-                    "path": path,
-                    "text_preview": full_text[:500] if full_text else "(Boş)",
-                    "firm": record.firm if record else "(Bulunamadı)",
-                    "subject": record.subject if record else "(Bulunamadı)",
-                    "amount": f"{record.amount} {record.currency or ''}" if record and record.amount else "(Bulunamadı)",
-                })
-
-            if record is None:
-                skipped += 1
-                continue
-
-            save_offer(record)
-            processed += 1
+            if record is not None:
+                records.append(record)
         except Exception as exc:  # noqa: BLE001
             logging.exception("Dosya işlenemedi: %s", path)
             error_text = sanitize_text(str(exc))
-            errors.append(f"{path} okunamadı: {error_text}")
+            errors.append(f"{os.path.basename(path)}: {error_text}")
 
         if progress_callback:
             progress_callback(index / total if total else 1.0)
 
-    return processed, skipped, errors, debug_info
+    return records, errors
+
+
+def save_offers_batch(records: list[OfferRecord]) -> int:
+    """Save multiple offers to database at once"""
+    saved = 0
+    with sqlite3.connect(DB_PATH) as conn:
+        for record in records:
+            try:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO teklifler (file_path, firm, subject, amount, currency, extracted_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        record.file_path,
+                        record.firm,
+                        record.subject,
+                        record.amount,
+                        record.currency,
+                        datetime.now().isoformat(timespec="seconds"),
+                    ),
+                )
+                saved += 1
+            except Exception as exc:  # noqa: BLE001
+                logging.error("Kayıt başarısız: %s - %s", record.file_path, exc)
+    return saved
 
 
 def read_log_tail(max_lines: int = 200) -> str:
@@ -388,156 +448,226 @@ def read_log_tail(max_lines: int = 200) -> str:
     return "".join(lines[-max_lines:]) or "Log dosyası boş."
 
 
-def render_backend_log() -> None:
-    with st.expander("Backend Logu"):
-        st.code(read_log_tail(), language="text")
+def render_home_page() -> None:
+    """Ana sayfa: PDF tarama ve önizleme"""
+    st.header("📄 Teklif PDF Tarama")
 
+    # Initialize session state for parsed offers
+    if "parsed_offers" not in st.session_state:
+        st.session_state.parsed_offers = []
+    if "selected_indices" not in st.session_state:
+        st.session_state.selected_indices = []
 
-def render_upload_panel() -> None:
-    st.subheader("PDF Dosyası Ekle")
-    uploaded_files = st.file_uploader(
-        "Teklif PDF'lerini seçin",
-        type=["pdf"],
-        accept_multiple_files=True,
-    )
-    debug_mode = st.checkbox("Debug Modu (PDF'den çıkarılan metni göster)", key="upload_debug")
-    if st.button("Seçilen PDF'leri Tara", type="primary"):
-        if not uploaded_files:
-            st.info("Lütfen en az bir PDF seçin.")
-            return
-        paths = []
-        for file in uploaded_files:
-            temp_path = os.path.join(st.session_state.temp_dir, file.name)
-            with open(temp_path, "wb") as temp_file:
-                temp_file.write(file.read())
-            paths.append(temp_path)
-        progress_bar = st.progress(0)
-        status_area = st.empty()
-        processed, skipped, errors, debug_info = process_files(
-            paths,
-            debug_mode=debug_mode,
-            progress_callback=progress_bar.progress,
-            status_callback=status_area.info,
-        )
-        status_area.success("Tarama tamamlandı.")
-        st.success(f"{processed} teklif işlendi, {skipped} dosya teklif olarak algılanmadı.")
-        if errors:
-            st.warning("\n".join(errors))
-        if debug_mode and debug_info:
-            st.subheader("Debug Bilgileri")
-            for info in debug_info:
-                with st.expander(f"📄 {os.path.basename(info['path'])}"):
-                    st.write(f"**Firma:** {info['firm']}")
-                    st.write(f"**Konu:** {info['subject']}")
-                    st.write(f"**Tutar:** {info['amount']}")
-                    st.text_area("Metin Önizleme", info['text_preview'], height=200)
-        render_backend_log()
-
-
-def render_folder_panel() -> None:
+    # Folder scanning section
     st.subheader("Klasör Tara")
-    st.caption(
-        "Seçilen klasörün içindeki firma klasörlerinde adı 'teklif' geçen alt klasörler taranır."
-    )
-
-    def choose_scan_folder() -> None:
-        selected = pick_folder()
-        if selected:
-            st.session_state.scan_folder_path = selected
-
     if "scan_folder_path" not in st.session_state:
         st.session_state.scan_folder_path = ""
-    input_col, browse_col = st.columns([4, 1])
-    with input_col:
+
+    col1, col2 = st.columns([4, 1])
+    with col1:
         st.text_input(
             "Firma klasörlerinin bulunduğu ana klasör yolu",
             key="scan_folder_path",
+            placeholder="E:/DELTA",
         )
-    with browse_col:
-        st.button("Gözat", on_click=choose_scan_folder)
-    folder = st.session_state.scan_folder_path
-    debug_mode = st.checkbox("Debug Modu (PDF'den çıkarılan metni göster)", key="folder_debug")
-    if st.button("Klasörü Tara"):
+    with col2:
+        if st.button("Gözat"):
+            selected = pick_folder()
+            if selected:
+                st.session_state.scan_folder_path = selected
+                st.rerun()
+
+    if st.button("📂 Klasörü Tara", type="primary", use_container_width=True):
+        folder = st.session_state.scan_folder_path
         if not folder:
-            st.info("Lütfen bir klasör yolu girin.")
+            st.warning("Lütfen klasör yolu girin.")
             return
+
         logging.info("Klasör taraması başlatıldı: %s", folder)
         pdf_files = scan_company_offer_pdfs(folder)
+
         if not pdf_files:
             st.warning("Teklif klasörlerinde PDF bulunamadı.")
-            render_backend_log()
             return
+
         progress_bar = st.progress(0)
         status_area = st.empty()
-        processed, skipped, errors, debug_info = process_files(
+
+        records, errors = process_files(
             pdf_files,
-            debug_mode=debug_mode,
             progress_callback=progress_bar.progress,
             status_callback=status_area.info,
         )
-        status_area.success("Tarama tamamlandı.")
-        st.success(f"{processed} teklif işlendi, {skipped} dosya teklif olarak algılanmadı.")
+
+        status_area.success("✅ Tarama tamamlandı!")
+        st.session_state.parsed_offers = records
+        st.session_state.selected_indices = list(range(len(records)))  # Select all by default
+
         if errors:
-            st.warning("\n".join(errors))
-        if debug_mode and debug_info:
-            st.subheader("Debug Bilgileri")
-            for info in debug_info[:10]:  # Show first 10 for performance
-                with st.expander(f"📄 {os.path.basename(info['path'])}"):
-                    st.write(f"**Firma:** {info['firm']}")
-                    st.write(f"**Konu:** {info['subject']}")
-                    st.write(f"**Tutar:** {info['amount']}")
-                    st.text_area("Metin Önizleme", info['text_preview'], height=200, key=f"debug_{info['path']}")
-            if len(debug_info) > 10:
-                st.info(f"İlk 10 dosya gösteriliyor. Toplam {len(debug_info)} dosya işlendi.")
-        render_backend_log()
+            with st.expander("⚠️ Hatalar"):
+                st.error("\n\n".join(errors))
+
+    # Display parsed offers in table with checkboxes
+    if st.session_state.parsed_offers:
+        st.divider()
+        st.subheader(f"📋 Bulunan Teklifler ({len(st.session_state.parsed_offers)})")
+
+        # Select all checkbox
+        select_all = st.checkbox(
+            "🔘 Tümünü Seç / Seçimi Kaldır",
+            value=len(st.session_state.selected_indices) == len(st.session_state.parsed_offers),
+            key="select_all",
+        )
+
+        if select_all:
+            st.session_state.selected_indices = list(range(len(st.session_state.parsed_offers)))
+        else:
+            if len(st.session_state.selected_indices) == len(st.session_state.parsed_offers):
+                st.session_state.selected_indices = []
+
+        # Display offers in table format
+        for idx, offer in enumerate(st.session_state.parsed_offers):
+            col_check, col_firm, col_subject, col_amount = st.columns([1, 3, 4, 2])
+
+            with col_check:
+                is_selected = st.checkbox(
+                    "Seç",
+                    value=idx in st.session_state.selected_indices,
+                    key=f"check_{idx}",
+                    label_visibility="collapsed",
+                )
+                if is_selected and idx not in st.session_state.selected_indices:
+                    st.session_state.selected_indices.append(idx)
+                elif not is_selected and idx in st.session_state.selected_indices:
+                    st.session_state.selected_indices.remove(idx)
+
+            with col_firm:
+                st.write(f"**{offer.firm or '(Firma bulunamadı)'}**")
+
+            with col_subject:
+                st.write(offer.subject or "(Konu bulunamadı)")
+
+            with col_amount:
+                if offer.amount:
+                    st.write(f"**{offer.amount:,.2f} {offer.currency or ''}**")
+                else:
+                    st.write("(Tutar bulunamadı)")
+
+            # File path in small text
+            st.caption(f"📁 {os.path.basename(offer.file_path)}")
+            st.divider()
+
+        # Save button
+        st.write(f"**Seçili: {len(st.session_state.selected_indices)} / {len(st.session_state.parsed_offers)}**")
+
+        if st.button(
+            f"💾 Seçili {len(st.session_state.selected_indices)} Teklifi DB'ye Ekle",
+            type="primary",
+            use_container_width=True,
+            disabled=len(st.session_state.selected_indices) == 0,
+        ):
+            selected_offers = [
+                st.session_state.parsed_offers[i] for i in st.session_state.selected_indices
+            ]
+            saved = save_offers_batch(selected_offers)
+            st.success(f"✅ {saved} teklif veritabanına eklendi!")
+            st.session_state.parsed_offers = []
+            st.session_state.selected_indices = []
+            st.rerun()
 
 
-def render_offers_table() -> None:
-    st.subheader("Teklif Listesi")
+def render_tekliflerim_page() -> None:
+    """Tekliflerim sayfası: DB'deki tüm teklifler + Excel export"""
+    st.header("📋 Tekliflerim")
+
     offers = load_offers()
+
     if not offers:
-        st.info("Henüz kayıtlı teklif yok.")
+        st.info("Henüz veritabanında teklif yok. Ana sayfadan PDF tarayın ve ekleyin.")
         return
-    table_data = [
-        {
-            "Firma": offer.firm,
-            "Konu": offer.subject,
-            "Tutar": "" if offer.amount is None else f"{offer.amount:,.2f}",
-            "Para Birimi": offer.currency or "",
-            "Dosya": offer.file_path,
-        }
-        for offer in offers
-    ]
-    st.dataframe(table_data, use_container_width=True, hide_index=True)
 
+    st.write(f"**Toplam {len(offers)} teklif**")
 
-def render_summary_table() -> None:
-    st.subheader("Özet Tablo")
-    summary = load_summary()
-    if not summary:
-        st.info("Özet için teklif bulunamadı.")
-        return
-    summary_data = [
-        {
-            "Firma": firm,
-            "Konu": subject,
-            "Toplam Tutar": f"{total:,.2f}",
-        }
-        for firm, subject, total in summary
-    ]
-    st.dataframe(summary_data, use_container_width=True, hide_index=True)
+    # Excel export button
+    df = get_offers_dataframe()
+    if not df.empty:
+        # Convert to Excel in memory
+        from io import BytesIO
 
+        buffer = BytesIO()
+        with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+            df.to_excel(writer, index=False, sheet_name="Teklifler")
 
-def render_reset_section() -> None:
-    st.subheader("Listeyi Sıfırla")
-    st.warning(
-        "Bu işlem mevcut SQLite veritabanını siler ve tüm kayıtları temizler.",
-        icon="⚠️",
-    )
-    confirm = st.checkbox("Listeyi sıfırlamayı onaylıyorum")
-    if st.button("Listeyi Sıfırla", disabled=not confirm):
+        st.download_button(
+            label="📥 Excel Olarak İndir",
+            data=buffer.getvalue(),
+            file_name="teklifler.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    st.divider()
+
+    # Display offers as dataframe
+    table_data = {
+        "Firma": [o.firm for o in offers],
+        "Konu": [o.subject for o in offers],
+        "Tutar": [f"{o.amount:,.2f}" if o.amount is not None else "" for o in offers],
+        "Para Birimi": [o.currency or "" for o in offers],
+        "Dosya": [os.path.basename(o.file_path) for o in offers],
+    }
+
+    st.dataframe(table_data, use_container_width=True, hide_index=False)
+
+    # Reset database section
+    st.divider()
+    st.subheader("🗑️ Veritabanını Temizle")
+    st.warning("Bu işlem tüm teklifleri silecektir ve geri alınamaz!")
+    confirm = st.checkbox("Veritabanını silmeyi onaylıyorum")
+    if st.button("Tüm Teklifleri Sil", disabled=not confirm, type="secondary"):
         reset_db()
-        st.success("Veritabanı sıfırlandı.")
+        st.success("Veritabanı temizlendi.")
+        st.rerun()
+
+
+def render_dashboard_page() -> None:
+    """Dashboard sayfası: İstatistikler ve grafikler"""
+    st.header("📊 Dashboard")
+
+    stats = get_dashboard_stats()
+
+    # Top metrics
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("Toplam Teklif", stats["total_offers"])
+    with col2:
+        st.metric("Toplam Firma", stats["total_firms"])
+
+    st.divider()
+
+    # Amounts by currency
+    if stats["amounts_by_currency"]:
+        st.subheader("💰 Para Birimine Göre Toplam Tutarlar")
+        currency_data = {
+            "Para Birimi": [row[0] or "Belirtilmemiş" for row in stats["amounts_by_currency"]],
+            "Toplam Tutar": [f"{row[1]:,.2f}" for row in stats["amounts_by_currency"]],
+            "Adet": [row[2] for row in stats["amounts_by_currency"]],
+        }
+        st.dataframe(currency_data, use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # Top firms
+    if stats["top_firms"]:
+        st.subheader("🏢 En Yüksek Toplam Tutarlı Firmalar (Top 10)")
+        firms_data = {
+            "Firma": [row[0] for row in stats["top_firms"]],
+            "Toplam Tutar": [f"{row[1]:,.2f}" for row in stats["top_firms"]],
+            "Teklif Sayısı": [row[2] for row in stats["top_firms"]],
+        }
+        st.dataframe(firms_data, use_container_width=True, hide_index=True)
+
+
+# Old UI functions removed - replaced with sidebar navigation
 
 
 def ensure_temp_dir() -> str:
@@ -559,27 +689,35 @@ def pick_folder() -> str | None:
 
 def main() -> None:
     st.set_page_config(page_title="Teklif Listeleme", page_icon="📄", layout="wide")
-    st.title("Teklif Listeleme")
-    st.caption("PDF tekliflerini tarayın, listeleyin ve özetleyin.")
 
     init_db()
     if "temp_dir" not in st.session_state:
         st.session_state.temp_dir = ensure_temp_dir()
 
-    tab_upload, tab_scan, tab_list, tab_summary, tab_reset = st.tabs(
-        ["PDF Ekle", "Klasör Tara", "Teklif Listesi", "Özet", "Sıfırla"]
+    # Sidebar navigation
+    st.sidebar.title("📄 Teklif Listeleme")
+    st.sidebar.markdown("---")
+
+    page = st.sidebar.radio(
+        "Navigasyon",
+        ["🏠 Ana Sayfa", "📋 Tekliflerim", "📊 Dashboard"],
+        label_visibility="collapsed",
     )
 
-    with tab_upload:
-        render_upload_panel()
-    with tab_scan:
-        render_folder_panel()
-    with tab_list:
-        render_offers_table()
-    with tab_summary:
-        render_summary_table()
-    with tab_reset:
-        render_reset_section()
+    st.sidebar.markdown("---")
+    st.sidebar.caption("PDF tekliflerini tarayın, yönetin ve analiz edin.")
+
+    # Display backend log in sidebar
+    with st.sidebar.expander("📜 Backend Logu"):
+        st.code(read_log_tail(max_lines=100), language="text")
+
+    # Route to appropriate page
+    if page == "🏠 Ana Sayfa":
+        render_home_page()
+    elif page == "📋 Tekliflerim":
+        render_tekliflerim_page()
+    elif page == "📊 Dashboard":
+        render_dashboard_page()
 
 
 if __name__ == "__main__":
