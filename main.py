@@ -17,7 +17,7 @@ OFFER_FOLDER_PATTERN = re.compile(r"teklif", re.IGNORECASE)
 
 FIRM_PATTERNS = [
     re.compile(r"(?:Firma|Şirket|Müşteri|Kurum|Kuruluş)\s*[:\-]?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:A\.Ş\.|A\.S\.|Ltd\.?\s*Şti\.?|San\.|Tic\.)", re.IGNORECASE),
+    re.compile(r"(.+?(?:A\.Ş\.|A\.S\.|Ltd\.?\s*Şti\.?|San\.|Tic\.))", re.IGNORECASE),
 ]
 
 GREETINGS_PATTERN = re.compile(r"Sayın\s+(.+)", re.IGNORECASE)
@@ -195,14 +195,9 @@ def looks_like_offer(pages_text: list[str], subject: str, amount: float | None) 
     # Accept if we found subject OR amount (more lenient)
     if subject or amount is not None:
         return True
-    # Otherwise check for "teklif" keyword
+    # Otherwise check for "teklif" keyword or reasonable text length
     full_text = "\n".join(pages_text)
-    if OFFER_KEYWORD_PATTERN.search(full_text):
-        return True
-    # Also accept if PDF has reasonable amount of text (not empty)
-    if len(full_text.strip()) > 100:
-        return True
-    return False
+    return bool(OFFER_KEYWORD_PATTERN.search(full_text)) or len(full_text.strip()) > 100
 
 
 def parse_offer(path: str) -> OfferRecord | None:
@@ -317,33 +312,25 @@ def process_files(
             status_callback(f"{index}/{total} • {os.path.basename(path)} işleniyor...")
 
         try:
-            pages_text = extract_pages_from_pdf(path)
-            full_text = "\n".join(pages_text)
+            # Parse the offer using existing logic
+            record = parse_offer(path)
 
-            firm = extract_firm(pages_text)
-            subject = extract_subject(pages_text)
-            amount, currency = extract_amount_from_pages(pages_text)
-
+            # If debug mode, extract additional info for display
             if debug_mode:
+                pages_text = extract_pages_from_pdf(path)
+                full_text = "\n".join(pages_text)
                 debug_info.append({
                     "path": path,
                     "text_preview": full_text[:500] if full_text else "(Boş)",
-                    "firm": firm or "(Bulunamadı)",
-                    "subject": subject or "(Bulunamadı)",
-                    "amount": f"{amount} {currency or ''}" if amount else "(Bulunamadı)",
+                    "firm": record.firm if record else "(Bulunamadı)",
+                    "subject": record.subject if record else "(Bulunamadı)",
+                    "amount": f"{record.amount} {record.currency or ''}" if record and record.amount else "(Bulunamadı)",
                 })
 
-            if not looks_like_offer(pages_text, subject, amount):
+            if record is None:
                 skipped += 1
                 continue
 
-            record = OfferRecord(
-                file_path=path,
-                firm=firm,
-                subject=subject,
-                amount=amount,
-                currency=currency,
-            )
             save_offer(record)
             processed += 1
         except Exception as exc:  # noqa: BLE001
