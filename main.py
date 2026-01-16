@@ -447,10 +447,25 @@ def iter_offer_folders(root_folder: str) -> Iterable[str]:
 
 
 def scan_company_offer_pdfs(root_folder: str) -> list[str]:
+    """Scan for PDF files in offer folders.
+
+    Works in two modes:
+    1. If root_folder itself contains PDFs, scan it directly
+    2. Otherwise, look for company folders with 'teklif' subfolders
+    """
     pdf_files: list[str] = []
+
+    # First, check if root_folder itself has PDFs (direct scan mode)
+    direct_pdfs = walk_pdf_files(root_folder)
+    if direct_pdfs:
+        logging.info("Direkt tarama: %s içinde %s PDF bulundu.", root_folder, len(direct_pdfs))
+        return direct_pdfs
+
+    # Otherwise, scan for company folders with offer subfolders
     for offers_folder in iter_offer_folders(root_folder):
         pdf_files.extend(walk_pdf_files(offers_folder))
-    logging.info("Tarama tamamlandı: %s içinde %s PDF bulundu.", root_folder, len(pdf_files))
+
+    logging.info("Klasör yapısı taraması: %s içinde %s PDF bulundu.", root_folder, len(pdf_files))
     return pdf_files
 
 
