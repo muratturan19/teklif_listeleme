@@ -84,6 +84,50 @@ def reset_db() -> None:
     logging.info("Veritabanı sıfırlandı.")
 
 
+def standardize_existing_records() -> int:
+    """Standardize firm names and currency in existing database records.
+
+    Returns the number of records updated.
+    """
+    init_db()
+    updated_count = 0
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, firma, para_birimi FROM teklifler")
+        records = cursor.fetchall()
+
+        for record_id, firma, para_birimi in records:
+            # Standardize firm name
+            normalized_firma = normalize_firm_name(firma) if firma else firma
+
+            # Standardize currency
+            normalized_currency = para_birimi
+            if para_birimi:
+                currency_upper = para_birimi.upper().strip()
+                if currency_upper in ("€", "EURO", "EUR"):
+                    normalized_currency = "EUR"
+                elif currency_upper in ("₺", "TL", "TRY"):
+                    normalized_currency = "TL"
+                elif currency_upper == "USD":
+                    normalized_currency = "USD"
+                else:
+                    normalized_currency = currency_upper
+
+            # Update if changed
+            if normalized_firma != firma or normalized_currency != para_birimi:
+                cursor.execute(
+                    "UPDATE teklifler SET firma = ?, para_birimi = ? WHERE id = ?",
+                    (normalized_firma, normalized_currency, record_id)
+                )
+                updated_count += 1
+
+        conn.commit()
+
+    logging.info(f"Standardizasyon tamamlandı: {updated_count} kayıt güncellendi.")
+    return updated_count
+
+
 def extract_page_text(page, path: str, page_number: int) -> str:
     try:
         return sanitize_text(page.extract_text() or "")
@@ -812,6 +856,22 @@ def render_tekliflerim_page() -> None:
     }
 
     st.dataframe(table_data, use_container_width=True, hide_index=False)
+
+    # Standardization section
+    st.divider()
+    st.subheader("🔄 Kayıtları Standardize Et")
+    st.info(
+        "Bu işlem mevcut kayıtlardaki firma adlarını (Title Case) ve para birimlerini (BÜYÜK HARF) "
+        "standart formata çevirir. Örn: 'PAKSAN' → 'Paksan', 'Eur' → 'EUR'"
+    )
+    if st.button("Mevcut Kayıtları Standardize Et", type="primary"):
+        with st.spinner("Kayıtlar standardize ediliyor..."):
+            updated_count = standardize_existing_records()
+        if updated_count > 0:
+            st.success(f"✅ {updated_count} kayıt standardize edildi!")
+            st.rerun()
+        else:
+            st.info("Tüm kayıtlar zaten standart formatta.")
 
     # Reset database section
     st.divider()
