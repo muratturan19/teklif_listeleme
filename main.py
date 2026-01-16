@@ -77,9 +77,11 @@ def init_db() -> None:
 
 
 def reset_db() -> None:
-    if os.path.exists(DB_PATH):
-        os.remove(DB_PATH)
-    init_db()
+    """Clear all records from database without deleting the file"""
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM teklifler")
+        conn.commit()
+    logging.info("Veritabanı sıfırlandı.")
 
 
 def extract_page_text(page, path: str, page_number: int) -> str:
