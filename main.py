@@ -434,6 +434,19 @@ def save_offer(record: OfferRecord) -> None:
         )
 
 
+def get_existing_file_paths() -> set[str]:
+    """Get set of file paths that are already in the database.
+
+    Returns:
+        Set of absolute file paths already processed
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT file_path FROM teklifler")
+        return {row[0] for row in cursor.fetchall()}
+
+
 def load_offers() -> list[OfferRecord]:
     with sqlite3.connect(DB_PATH) as conn:
         rows = conn.execute(
@@ -729,16 +742,33 @@ def render_home_page() -> None:
             st.warning("Teklif klasörlerinde PDF bulunamadı.")
             return
 
+        # Filter out PDFs that are already in database
+        existing_paths = get_existing_file_paths()
+        new_pdf_files = [path for path in pdf_files if path not in existing_paths]
+        already_processed_count = len(pdf_files) - len(new_pdf_files)
+
+        # Show info about new vs existing PDFs
+        if already_processed_count > 0:
+            st.info(
+                f"📊 Toplam {len(pdf_files)} PDF bulundu. "
+                f"{already_processed_count} tanesi zaten veritabanında. "
+                f"Sadece {len(new_pdf_files)} yeni PDF işlenecek."
+            )
+
+        if not new_pdf_files:
+            st.success("✅ Tüm PDF'ler zaten veritabanında. Yeni dosya yok.")
+            return
+
         progress_bar = st.progress(0)
         status_area = st.empty()
 
         records, errors = process_files(
-            pdf_files,
+            new_pdf_files,
             progress_callback=progress_bar.progress,
             status_callback=status_area.info,
         )
 
-        status_area.success("✅ Tarama tamamlandı!")
+        status_area.success(f"✅ Tarama tamamlandı! {len(records)} yeni teklif bulundu.")
         st.session_state.parsed_offers = records
         st.session_state.selected_indices = list(range(len(records)))  # Select all by default
 
