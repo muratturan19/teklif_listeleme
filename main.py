@@ -64,6 +64,7 @@ logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
+    encoding="utf-8",  # Fix Turkish character encoding in logs
 )
 
 
