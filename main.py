@@ -17,31 +17,48 @@ LOG_PATH = "teklif_listeleme.log"
 OFFER_FOLDER_PATTERN = re.compile(r"teklif", re.IGNORECASE)
 
 FIRM_PATTERNS = [
+    # Turkish patterns
     re.compile(r"(?:Firma\s*Adı|Firma|Şirket|Müşteri|Kurum|Kuruluş)\s*[:\-]?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(.+?(?:A\.Ş\.|A\.S\.|Ltd\.?\s*Şti\.?|San\.|Tic\.))", re.IGNORECASE),
+    # English patterns
+    re.compile(r"(?:Company\s*Name|Company|Client|Customer|Organization)\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    # Company type abbreviations (works for both Turkish and English)
+    re.compile(r"(.+?(?:A\.Ş\.|A\.S\.|Ltd\.?\s*Şti\.?|San\.|Tic\.|Ltd\.|Inc\.|Corp\.|GmbH))", re.IGNORECASE),
 ]
 
-GREETINGS_PATTERN = re.compile(r"Sayın\s+(.+)", re.IGNORECASE)
+GREETINGS_PATTERN = re.compile(r"(?:Sayın|Dear)\s+(.+)", re.IGNORECASE)
 
 SUBJECT_PATTERNS = [
+    # Turkish patterns
     re.compile(r"Konu\s*[:\-]?\s*(.+)", re.IGNORECASE),
     re.compile(r"Teklif\s*Konusu\s*[:\-]?\s*(.+)", re.IGNORECASE),
-    re.compile(r"(?:Re|RE|Ref)\s*[:\-]?\s*(.+)", re.IGNORECASE),
     re.compile(r"İlgi\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    # English patterns
+    re.compile(r"Subject\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"Regarding\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"Project\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    # Both languages
+    re.compile(r"(?:Re|RE|Ref)\s*[:\-]?\s*(.+)", re.IGNORECASE),
 ]
 
 AMOUNT_PATTERNS = [
-    # Match amount with currency after keywords (support space-separated thousands)
-    # Example: "1.677 289,00 Euro" or "157.500 €"
+    # Turkish patterns - Match amount with currency after keywords
+    # Example: "Toplam Tutar: 1.677 289,00 Euro" or "Teklif Tutarı: 157.500 €"
     re.compile(
         r"(?:Toplam\s*(?:Tutar|Fiyat)?|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro)",
         re.IGNORECASE,
     ),
+    # English patterns - Match amount with currency after keywords
+    # Example: "Sum: 1,925.000€" or "Total Price: 1.925.000€" or "Grand Total: 1,925.000€"
+    re.compile(
+        r"(?:Sum|Total\s*(?:Price|Quote|Cost|Amount)?|Grand\s*Total)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)",
+        re.IGNORECASE,
+    ),
     # Match large amounts with currency (minimum 4 characters, support spaces)
-    re.compile(r"([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro)", re.IGNORECASE),
+    # This catches amounts without keywords
+    re.compile(r"([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)", re.IGNORECASE),
 ]
 
-OFFER_KEYWORD_PATTERN = re.compile(r"\bteklif\b", re.IGNORECASE)
+OFFER_KEYWORD_PATTERN = re.compile(r"\b(?:teklif|offer|quote|proposal)\b", re.IGNORECASE)
 
 # Firm name abbreviations for standardization
 _ABBREVIATIONS = {
