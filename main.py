@@ -16,14 +16,17 @@ LOG_PATH = "teklif_listeleme.log"
 OFFERS_FOLDER_NAME = "Teklifler"
 
 FIRM_PATTERNS = [
-    re.compile(r"(?:Firma|Şirket|Müşteri)\s*[:\-]\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:Firma|Şirket|Müşteri|Kurum|Kuruluş)\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:A\.Ş\.|A\.S\.|Ltd\.?\s*Şti\.?|San\.|Tic\.)", re.IGNORECASE),
 ]
 
 GREETINGS_PATTERN = re.compile(r"Sayın\s+(.+)", re.IGNORECASE)
 
 SUBJECT_PATTERNS = [
-    re.compile(r"Konu\s*[:\-]\s*(.+)", re.IGNORECASE),
-    re.compile(r"Teklif\s*Konusu\s*[:\-]\s*(.+)", re.IGNORECASE),
+    re.compile(r"Konu\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"Teklif\s*Konusu\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:Re|RE|Ref)\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"İlgi\s*[:\-]?\s*(.+)", re.IGNORECASE),
 ]
 
 AMOUNT_PATTERNS = [
@@ -88,14 +91,20 @@ def extract_text_from_pdf(path: str) -> str:
 def extract_pages_from_pdf(path: str) -> list[str]:
     reader = PdfReader(path)
     chunks: list[str] = []
-    for page in reader.pages:
-        text = sanitize_text(page.extract_text() or "")
-        chunks.append(text)
+    for page_num, page in enumerate(reader.pages, start=1):
+        try:
+            text = page.extract_text() or ""
+            text = sanitize_text(text)
+            chunks.append(text)
+        except Exception as exc:
+            logging.warning(f"Sayfa {page_num} okunamadı ({path}): {exc}")
+            chunks.append("")
     return chunks
 
 
 def sanitize_text(value: str) -> str:
-    return value.encode("utf-8", "replace").decode("utf-8")
+    # Remove surrogate characters and other problematic Unicode
+    return value.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
 
 def extract_field(patterns: list[re.Pattern], text: str) -> str:
@@ -163,10 +172,17 @@ def extract_amount_from_pages(pages_text: list[str]) -> tuple[float | None, str 
 
 
 def looks_like_offer(pages_text: list[str], subject: str, amount: float | None) -> bool:
+    # Accept if we found subject OR amount (more lenient)
     if subject or amount is not None:
         return True
+    # Otherwise check for "teklif" keyword
     full_text = "\n".join(pages_text)
-    return bool(OFFER_KEYWORD_PATTERN.search(full_text))
+    if OFFER_KEYWORD_PATTERN.search(full_text):
+        return True
+    # Also accept if PDF has reasonable amount of text (not empty)
+    if len(full_text.strip()) > 100:
+        return True
+    return False
 
 
 def parse_offer(path: str) -> OfferRecord | None:
@@ -256,23 +272,49 @@ def scan_company_offer_pdfs(root_folder: str) -> list[str]:
     return pdf_files
 
 
-def process_files(paths: list[str]) -> tuple[int, int, list[str]]:
+def process_files(paths: list[str], debug_mode: bool = False) -> tuple[int, int, list[str], list[dict]]:
     processed = 0
     skipped = 0
     errors: list[str] = []
+    debug_info: list[dict] = []
+
     for path in paths:
         try:
-            record = parse_offer(path)
-            if record is None:
+            pages_text = extract_pages_from_pdf(path)
+            full_text = "\n".join(pages_text)
+
+            firm = extract_firm(pages_text)
+            subject = extract_subject(pages_text)
+            amount, currency = extract_amount_from_pages(pages_text)
+
+            if debug_mode:
+                debug_info.append({
+                    "path": path,
+                    "text_preview": full_text[:500] if full_text else "(Boş)",
+                    "firm": firm or "(Bulunamadı)",
+                    "subject": subject or "(Bulunamadı)",
+                    "amount": f"{amount} {currency or ''}" if amount else "(Bulunamadı)",
+                })
+
+            if not looks_like_offer(pages_text, subject, amount):
                 skipped += 1
                 continue
+
+            record = OfferRecord(
+                file_path=path,
+                firm=firm,
+                subject=subject,
+                amount=amount,
+                currency=currency,
+            )
             save_offer(record)
             processed += 1
         except Exception as exc:  # noqa: BLE001
             logging.exception("Dosya işlenemedi: %s", path)
             error_text = sanitize_text(str(exc))
             errors.append(f"{path} okunamadı: {error_text}")
-    return processed, skipped, errors
+
+    return processed, skipped, errors, debug_info
 
 
 def render_upload_panel() -> None:
@@ -282,6 +324,7 @@ def render_upload_panel() -> None:
         type=["pdf"],
         accept_multiple_files=True,
     )
+    debug_mode = st.checkbox("Debug Modu (PDF'den çıkarılan metni göster)", key="upload_debug")
     if st.button("Seçilen PDF'leri Tara", type="primary"):
         if not uploaded_files:
             st.info("Lütfen en az bir PDF seçin.")
@@ -293,10 +336,18 @@ def render_upload_panel() -> None:
                 temp_file.write(file.read())
             paths.append(temp_path)
         with st.spinner("PDF'ler işleniyor..."):
-            processed, skipped, errors = process_files(paths)
+            processed, skipped, errors, debug_info = process_files(paths, debug_mode)
         st.success(f"{processed} teklif işlendi, {skipped} dosya teklif olarak algılanmadı.")
         if errors:
             st.warning("\n".join(errors))
+        if debug_mode and debug_info:
+            st.subheader("Debug Bilgileri")
+            for info in debug_info:
+                with st.expander(f"📄 {os.path.basename(info['path'])}"):
+                    st.write(f"**Firma:** {info['firm']}")
+                    st.write(f"**Konu:** {info['subject']}")
+                    st.write(f"**Tutar:** {info['amount']}")
+                    st.text_area("Metin Önizleme", info['text_preview'], height=200)
 
 
 def render_folder_panel() -> None:
@@ -319,6 +370,7 @@ def render_folder_panel() -> None:
                 st.session_state.scan_folder_path = selected
                 st.rerun()
     folder = st.session_state.scan_folder_path
+    debug_mode = st.checkbox("Debug Modu (PDF'den çıkarılan metni göster)", key="folder_debug")
     if st.button("Klasörü Tara"):
         if not folder:
             st.info("Lütfen bir klasör yolu girin.")
@@ -328,10 +380,20 @@ def render_folder_panel() -> None:
             st.warning("Teklifler klasörlerinde PDF bulunamadı.")
             return
         with st.spinner("PDF'ler işleniyor..."):
-            processed, skipped, errors = process_files(pdf_files)
+            processed, skipped, errors, debug_info = process_files(pdf_files, debug_mode)
         st.success(f"{processed} teklif işlendi, {skipped} dosya teklif olarak algılanmadı.")
         if errors:
             st.warning("\n".join(errors))
+        if debug_mode and debug_info:
+            st.subheader("Debug Bilgileri")
+            for info in debug_info[:10]:  # Show first 10 for performance
+                with st.expander(f"📄 {os.path.basename(info['path'])}"):
+                    st.write(f"**Firma:** {info['firm']}")
+                    st.write(f"**Konu:** {info['subject']}")
+                    st.write(f"**Tutar:** {info['amount']}")
+                    st.text_area("Metin Önizleme", info['text_preview'], height=200, key=f"debug_{info['path']}")
+            if len(debug_info) > 10:
+                st.info(f"İlk 10 dosya gösteriliyor. Toplam {len(debug_info)} dosya işlendi.")
 
 
 def render_offers_table() -> None:
