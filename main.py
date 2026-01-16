@@ -43,6 +43,23 @@ AMOUNT_PATTERNS = [
 
 OFFER_KEYWORD_PATTERN = re.compile(r"\bteklif\b", re.IGNORECASE)
 
+# Firm name abbreviations for standardization
+_ABBREVIATIONS = {
+    "a.ş": "A.Ş",
+    "a.ş.": "A.Ş.",
+    "ltd": "Ltd.",
+    "ltd.": "Ltd.",
+    "şti": "Şti.",
+    "şti.": "Şti.",
+    "inc": "Inc.",
+    "inc.": "Inc.",
+    "gmbh": "GmbH",
+}
+# Pre-compile regex patterns for performance
+_COMPILED_ABBR_PATTERNS = [
+    (re.compile(re.escape(k), re.IGNORECASE), v) for k, v in _ABBREVIATIONS.items()
+]
+
 logging.basicConfig(
     filename=LOG_PATH,
     level=logging.INFO,
@@ -94,31 +111,22 @@ def standardize_existing_records() -> int:
 
     with sqlite3.connect(DB_PATH) as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT id, firma, para_birimi FROM teklifler")
-        records = cursor.fetchall()
+        # Fixed: Use correct column names from schema (firm, currency not firma, para_birimi)
+        cursor.execute("SELECT id, firm, currency FROM teklifler")
 
-        for record_id, firma, para_birimi in records:
+        # Iterate directly over cursor for better memory efficiency
+        for record_id, firm, currency in cursor:
             # Standardize firm name
-            normalized_firma = normalize_firm_name(firma) if firma else firma
+            normalized_firm = normalize_firm_name(firm) if firm else firm
 
-            # Standardize currency
-            normalized_currency = para_birimi
-            if para_birimi:
-                currency_upper = para_birimi.upper().strip()
-                if currency_upper in ("€", "EURO", "EUR"):
-                    normalized_currency = "EUR"
-                elif currency_upper in ("₺", "TL", "TRY"):
-                    normalized_currency = "TL"
-                elif currency_upper == "USD":
-                    normalized_currency = "USD"
-                else:
-                    normalized_currency = currency_upper
+            # Standardize currency using helper function
+            normalized_currency = normalize_currency(currency)
 
             # Update if changed
-            if normalized_firma != firma or normalized_currency != para_birimi:
+            if normalized_firm != firm or normalized_currency != currency:
                 cursor.execute(
-                    "UPDATE teklifler SET firma = ?, para_birimi = ? WHERE id = ?",
-                    (normalized_firma, normalized_currency, record_id)
+                    "UPDATE teklifler SET firm = ?, currency = ? WHERE id = ?",
+                    (normalized_firm, normalized_currency, record_id)
                 )
                 updated_count += 1
 
@@ -177,36 +185,43 @@ def sanitize_text(value: str) -> str:
     return value.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
 
+def normalize_currency(currency: str | None) -> str | None:
+    """Normalize currency code to uppercase standard format.
+
+    Args:
+        currency: Raw currency string (e.g., "Eur", "€", "TL")
+
+    Returns:
+        Standardized currency code (e.g., "EUR", "TL", "USD") or None
+    """
+    if not currency:
+        return None
+
+    currency_upper = currency.upper().strip()
+    if currency_upper in ("€", "EURO", "EUR"):
+        return "EUR"
+    if currency_upper in ("₺", "TL", "TRY"):
+        return "TL"
+    if currency_upper == "USD":
+        return "USD"
+    return currency_upper
+
+
 def normalize_firm_name(firm: str) -> str:
     """Normalize firm name for consistency.
 
     Applies title case but preserves common business abbreviations
-    like A.Ş, Ltd., Inc., etc.
+    like A.Ş, Ltd., Inc., etc. Uses pre-compiled regex patterns for performance.
     """
     if not firm or len(firm) <= 2:
         return firm
 
-    # Special abbreviations that should remain uppercase
-    abbreviations = {
-        "a.ş": "A.Ş",
-        "a.ş.": "A.Ş.",
-        "ltd": "Ltd.",
-        "ltd.": "Ltd.",
-        "şti": "Şti.",
-        "şti.": "Şti.",
-        "inc": "Inc.",
-        "inc.": "Inc.",
-        "gmbh": "GmbH",
-    }
-
     # Apply title case
     normalized = firm.title()
 
-    # Fix common abbreviations
-    for abbr_lower, abbr_correct in abbreviations.items():
-        # Case-insensitive replacement
-        pattern = re.compile(re.escape(abbr_lower), re.IGNORECASE)
-        normalized = pattern.sub(abbr_correct, normalized)
+    # Fix common abbreviations using pre-compiled patterns
+    for pattern, replacement in _COMPILED_ABBR_PATTERNS:
+        normalized = pattern.sub(replacement, normalized)
 
     return normalized.strip()
 
@@ -350,19 +365,9 @@ def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, s
 
     try:
         amount = float(normalized)
-        # Normalize currency symbols - always uppercase
-        if currency:
-            currency_upper = currency.upper().strip()
-            if currency_upper in ("€", "EURO", "EUR"):
-                currency = "EUR"
-            elif currency_upper in ("₺", "TL", "TRY"):
-                currency = "TL"
-            elif currency_upper == "USD":
-                currency = "USD"
-            else:
-                # Default: convert to uppercase for consistency
-                currency = currency_upper
-        return amount, currency
+        # Normalize currency using helper function
+        normalized_currency = normalize_currency(currency)
+        return amount, normalized_currency
     except ValueError:
         return None, None
 
