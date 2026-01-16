@@ -48,9 +48,10 @@ AMOUNT_PATTERNS = [
         re.IGNORECASE,
     ),
     # English patterns - Match amount with currency after keywords
+    # Support large whitespace for table formatting: "Sum                    2.125.400€"
     # Example: "Sum: 1,925.000€" or "Total Price: 1.925.000€" or "Grand Total: 1,925.000€"
     re.compile(
-        r"(?:Sum|Total\s*(?:Price|Quote|Cost|Amount)?|Grand\s*Total)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)",
+        r"(?:Sum|Total\s*(?:Price|Quote|Cost|Amount)?|Grand\s*Total)\s*[:\-]?\s*(?:\([^\)]*\))?\s+([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)",
         re.IGNORECASE,
     ),
     # Match large amounts with currency (minimum 4 characters, support spaces)
@@ -255,8 +256,14 @@ def extract_field(patterns: list[re.Pattern], text: str) -> str:
             value = match.group(1).strip()
             # Split by newline or common field separators
             value = re.split(r"\n|\r", value)[0].strip()
-            # Remove trailing noise like "Referansınız", "Teklif No", etc.
-            value = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", value, flags=re.IGNORECASE)[0].strip()
+            # Remove trailing noise - both Turkish and English stopwords
+            # Turkish: Referansınız, Teklif No, Tarih, Sayfa
+            # English: Your Reference, Offer No, Page, History, Topic
+            value = re.split(
+                r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa|Your|Offer|Page|History|Topic)",
+                value,
+                flags=re.IGNORECASE
+            )[0].strip()
             return value
     return ""
 
@@ -271,17 +278,22 @@ def extract_firm(pages_text: list[str]) -> str:
         if not lines:
             continue  # Skip empty pages
 
-        # Try to find "Firma Adı:" or similar in first 20 lines
+        # Try to find "Firma Adı:" or "Company Name:" in first 20 lines
         for i, line in enumerate(lines[:20]):
-            if re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]", line, re.IGNORECASE):
+            # Search for both Turkish and English firm labels
+            if re.search(r"(?:Firma\s*Adı|Firma|Company\s*Name)\s*[:\-]", line, re.IGNORECASE):
                 logging.debug(f"Firma etiketi bulundu (sayfa {page_idx + 1}): {line}")
                 # Try to get firm name from same line after colon
-                match = re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
+                match = re.search(r"(?:Firma\s*Adı|Firma|Company\s*Name)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
                 if match:
                     firm = match.group(1).strip()
                     logging.debug(f"Aynı satırdan firma çıkartıldı (ham): {firm}")
-                    # Clean up trailing noise
-                    firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
+                    # Clean up trailing noise - both Turkish and English
+                    firm = re.split(
+                        r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa|Your|Offer|Page|History|Topic)",
+                        firm,
+                        flags=re.IGNORECASE
+                    )[0].strip()
                     logging.debug(f"Temizlenmiş firma: {firm}")
                     if firm and len(firm) > 2:
                         return normalize_firm_name(firm)
@@ -289,7 +301,11 @@ def extract_firm(pages_text: list[str]) -> str:
                 if i + 1 < len(lines):
                     firm = lines[i + 1].strip()
                     logging.debug(f"Sonraki satırdan firma çıkartıldı: {firm}")
-                    firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
+                    firm = re.split(
+                        r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa|Your|Offer|Page|History|Topic)",
+                        firm,
+                        flags=re.IGNORECASE
+                    )[0].strip()
                     if firm and len(firm) > 2:
                         return normalize_firm_name(firm)
 
