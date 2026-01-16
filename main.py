@@ -75,21 +75,34 @@ def reset_db() -> None:
     init_db()
 
 
+def extract_page_text(page, path: str, page_number: int) -> str:
+    try:
+        return sanitize_text(page.extract_text() or "")
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Sayfa metni okunamadı: %s (sayfa %s): %s",
+            path,
+            page_number,
+            sanitize_text(str(exc)),
+        )
+        return ""
+
+
 def extract_text_from_pdf(path: str) -> str:
-    reader = PdfReader(path)
+    reader = PdfReader(path, strict=False)
     chunks: list[str] = []
-    for page in reader.pages:
-        text = sanitize_text(page.extract_text() or "")
+    for index, page in enumerate(reader.pages, start=1):
+        text = extract_page_text(page, path, index)
         if text.strip():
             chunks.append(text)
     return "\n".join(chunks)
 
 
 def extract_pages_from_pdf(path: str) -> list[str]:
-    reader = PdfReader(path)
+    reader = PdfReader(path, strict=False)
     chunks: list[str] = []
-    for page in reader.pages:
-        text = sanitize_text(page.extract_text() or "")
+    for index, page in enumerate(reader.pages, start=1):
+        text = extract_page_text(page, path, index)
         chunks.append(text)
     return chunks
 
