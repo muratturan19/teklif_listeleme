@@ -88,8 +88,18 @@ def extract_page_text(page, path: str, page_number: int) -> str:
         return ""
 
 
+def load_pdf_reader(path: str) -> PdfReader | None:
+    try:
+        return PdfReader(path, strict=False)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("PDF okunamadı: %s (%s)", path, sanitize_text(str(exc)))
+        return None
+
+
 def extract_text_from_pdf(path: str) -> str:
-    reader = PdfReader(path, strict=False)
+    reader = load_pdf_reader(path)
+    if reader is None:
+        return ""
     chunks: list[str] = []
     for index, page in enumerate(reader.pages, start=1):
         text = extract_page_text(page, path, index)
@@ -99,7 +109,9 @@ def extract_text_from_pdf(path: str) -> str:
 
 
 def extract_pages_from_pdf(path: str) -> list[str]:
-    reader = PdfReader(path, strict=False)
+    reader = load_pdf_reader(path)
+    if reader is None:
+        return []
     chunks: list[str] = []
     for index, page in enumerate(reader.pages, start=1):
         text = extract_page_text(page, path, index)
