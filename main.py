@@ -133,6 +133,40 @@ def sanitize_text(value: str) -> str:
     return value.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
 
+def normalize_firm_name(firm: str) -> str:
+    """Normalize firm name for consistency.
+
+    Applies title case but preserves common business abbreviations
+    like A.Ş, Ltd., Inc., etc.
+    """
+    if not firm or len(firm) <= 2:
+        return firm
+
+    # Special abbreviations that should remain uppercase
+    abbreviations = {
+        "a.ş": "A.Ş",
+        "a.ş.": "A.Ş.",
+        "ltd": "Ltd.",
+        "ltd.": "Ltd.",
+        "şti": "Şti.",
+        "şti.": "Şti.",
+        "inc": "Inc.",
+        "inc.": "Inc.",
+        "gmbh": "GmbH",
+    }
+
+    # Apply title case
+    normalized = firm.title()
+
+    # Fix common abbreviations
+    for abbr_lower, abbr_correct in abbreviations.items():
+        # Case-insensitive replacement
+        pattern = re.compile(re.escape(abbr_lower), re.IGNORECASE)
+        normalized = pattern.sub(abbr_correct, normalized)
+
+    return normalized.strip()
+
+
 def extract_field(patterns: list[re.Pattern], text: str) -> str:
     for pattern in patterns:
         match = pattern.search(text)
@@ -169,21 +203,21 @@ def extract_firm(pages_text: list[str]) -> str:
                     firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
                     logging.debug(f"Temizlenmiş firma: {firm}")
                     if firm and len(firm) > 2:
-                        return firm
+                        return normalize_firm_name(firm)
                 # If not found on same line, check next line
                 if i + 1 < len(lines):
                     firm = lines[i + 1].strip()
                     logging.debug(f"Sonraki satırdan firma çıkartıldı: {firm}")
                     firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
                     if firm and len(firm) > 2:
-                        return firm
+                        return normalize_firm_name(firm)
 
         # Fallback to header block extraction for this page
         header_block = "\n".join(lines[:12])
         firm = extract_field(FIRM_PATTERNS, header_block)
         if firm and len(firm) > 2:
             logging.debug(f"Header block'tan firma (sayfa {page_idx + 1}): {firm}")
-            return firm
+            return normalize_firm_name(firm)
 
         # Try greetings pattern
         for line in lines[:15]:
@@ -195,7 +229,7 @@ def extract_firm(pages_text: list[str]) -> str:
                 continue
             if len(candidate) > 2:
                 logging.debug(f"Greetings pattern'den firma (sayfa {page_idx + 1}): {candidate}")
-                return candidate
+                return normalize_firm_name(candidate)
 
     logging.warning("Firma adı bulunamadı. İlk 3 sayfa kontrol edildi.")
     return ""
@@ -272,12 +306,18 @@ def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, s
 
     try:
         amount = float(normalized)
-        # Normalize currency symbols
+        # Normalize currency symbols - always uppercase
         if currency:
-            if currency in ("€", "euro"):
+            currency_upper = currency.upper().strip()
+            if currency_upper in ("€", "EURO", "EUR"):
                 currency = "EUR"
-            elif currency == "₺":
+            elif currency_upper in ("₺", "TL", "TRY"):
                 currency = "TL"
+            elif currency_upper == "USD":
+                currency = "USD"
+            else:
+                # Default: convert to uppercase for consistency
+                currency = currency_upper
         return amount, currency
     except ValueError:
         return None, None
