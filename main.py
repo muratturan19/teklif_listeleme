@@ -84,6 +84,50 @@ def reset_db() -> None:
     logging.info("Veritabanı sıfırlandı.")
 
 
+def standardize_existing_records() -> int:
+    """Standardize firm names and currency in existing database records.
+
+    Returns the number of records updated.
+    """
+    init_db()
+    updated_count = 0
+
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, firma, para_birimi FROM teklifler")
+        records = cursor.fetchall()
+
+        for record_id, firma, para_birimi in records:
+            # Standardize firm name
+            normalized_firma = normalize_firm_name(firma) if firma else firma
+
+            # Standardize currency
+            normalized_currency = para_birimi
+            if para_birimi:
+                currency_upper = para_birimi.upper().strip()
+                if currency_upper in ("€", "EURO", "EUR"):
+                    normalized_currency = "EUR"
+                elif currency_upper in ("₺", "TL", "TRY"):
+                    normalized_currency = "TL"
+                elif currency_upper == "USD":
+                    normalized_currency = "USD"
+                else:
+                    normalized_currency = currency_upper
+
+            # Update if changed
+            if normalized_firma != firma or normalized_currency != para_birimi:
+                cursor.execute(
+                    "UPDATE teklifler SET firma = ?, para_birimi = ? WHERE id = ?",
+                    (normalized_firma, normalized_currency, record_id)
+                )
+                updated_count += 1
+
+        conn.commit()
+
+    logging.info(f"Standardizasyon tamamlandı: {updated_count} kayıt güncellendi.")
+    return updated_count
+
+
 def extract_page_text(page, path: str, page_number: int) -> str:
     try:
         return sanitize_text(page.extract_text() or "")
@@ -133,6 +177,40 @@ def sanitize_text(value: str) -> str:
     return value.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
 
+def normalize_firm_name(firm: str) -> str:
+    """Normalize firm name for consistency.
+
+    Applies title case but preserves common business abbreviations
+    like A.Ş, Ltd., Inc., etc.
+    """
+    if not firm or len(firm) <= 2:
+        return firm
+
+    # Special abbreviations that should remain uppercase
+    abbreviations = {
+        "a.ş": "A.Ş",
+        "a.ş.": "A.Ş.",
+        "ltd": "Ltd.",
+        "ltd.": "Ltd.",
+        "şti": "Şti.",
+        "şti.": "Şti.",
+        "inc": "Inc.",
+        "inc.": "Inc.",
+        "gmbh": "GmbH",
+    }
+
+    # Apply title case
+    normalized = firm.title()
+
+    # Fix common abbreviations
+    for abbr_lower, abbr_correct in abbreviations.items():
+        # Case-insensitive replacement
+        pattern = re.compile(re.escape(abbr_lower), re.IGNORECASE)
+        normalized = pattern.sub(abbr_correct, normalized)
+
+    return normalized.strip()
+
+
 def extract_field(patterns: list[re.Pattern], text: str) -> str:
     for pattern in patterns:
         match = pattern.search(text)
@@ -169,21 +247,21 @@ def extract_firm(pages_text: list[str]) -> str:
                     firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
                     logging.debug(f"Temizlenmiş firma: {firm}")
                     if firm and len(firm) > 2:
-                        return firm
+                        return normalize_firm_name(firm)
                 # If not found on same line, check next line
                 if i + 1 < len(lines):
                     firm = lines[i + 1].strip()
                     logging.debug(f"Sonraki satırdan firma çıkartıldı: {firm}")
                     firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
                     if firm and len(firm) > 2:
-                        return firm
+                        return normalize_firm_name(firm)
 
         # Fallback to header block extraction for this page
         header_block = "\n".join(lines[:12])
         firm = extract_field(FIRM_PATTERNS, header_block)
         if firm and len(firm) > 2:
             logging.debug(f"Header block'tan firma (sayfa {page_idx + 1}): {firm}")
-            return firm
+            return normalize_firm_name(firm)
 
         # Try greetings pattern
         for line in lines[:15]:
@@ -195,7 +273,7 @@ def extract_firm(pages_text: list[str]) -> str:
                 continue
             if len(candidate) > 2:
                 logging.debug(f"Greetings pattern'den firma (sayfa {page_idx + 1}): {candidate}")
-                return candidate
+                return normalize_firm_name(candidate)
 
     logging.warning("Firma adı bulunamadı. İlk 3 sayfa kontrol edildi.")
     return ""
@@ -272,12 +350,18 @@ def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, s
 
     try:
         amount = float(normalized)
-        # Normalize currency symbols
+        # Normalize currency symbols - always uppercase
         if currency:
-            if currency in ("€", "euro"):
+            currency_upper = currency.upper().strip()
+            if currency_upper in ("€", "EURO", "EUR"):
                 currency = "EUR"
-            elif currency == "₺":
+            elif currency_upper in ("₺", "TL", "TRY"):
                 currency = "TL"
+            elif currency_upper == "USD":
+                currency = "USD"
+            else:
+                # Default: convert to uppercase for consistency
+                currency = currency_upper
         return amount, currency
     except ValueError:
         return None, None
@@ -348,6 +432,19 @@ def save_offer(record: OfferRecord) -> None:
                 datetime.now().isoformat(timespec="seconds"),
             ),
         )
+
+
+def get_existing_file_paths() -> set[str]:
+    """Get set of file paths that are already in the database.
+
+    Returns:
+        Set of absolute file paths already processed
+    """
+    init_db()
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT file_path FROM teklifler")
+        return {row[0] for row in cursor.fetchall()}
 
 
 def load_offers() -> list[OfferRecord]:
@@ -645,16 +742,33 @@ def render_home_page() -> None:
             st.warning("Teklif klasörlerinde PDF bulunamadı.")
             return
 
+        # Filter out PDFs that are already in database
+        existing_paths = get_existing_file_paths()
+        new_pdf_files = [path for path in pdf_files if path not in existing_paths]
+        already_processed_count = len(pdf_files) - len(new_pdf_files)
+
+        # Show info about new vs existing PDFs
+        if already_processed_count > 0:
+            st.info(
+                f"📊 Toplam {len(pdf_files)} PDF bulundu. "
+                f"{already_processed_count} tanesi zaten veritabanında. "
+                f"Sadece {len(new_pdf_files)} yeni PDF işlenecek."
+            )
+
+        if not new_pdf_files:
+            st.success("✅ Tüm PDF'ler zaten veritabanında. Yeni dosya yok.")
+            return
+
         progress_bar = st.progress(0)
         status_area = st.empty()
 
         records, errors = process_files(
-            pdf_files,
+            new_pdf_files,
             progress_callback=progress_bar.progress,
             status_callback=status_area.info,
         )
 
-        status_area.success("✅ Tarama tamamlandı!")
+        status_area.success(f"✅ Tarama tamamlandı! {len(records)} yeni teklif bulundu.")
         st.session_state.parsed_offers = records
         st.session_state.selected_indices = list(range(len(records)))  # Select all by default
 
@@ -772,6 +886,22 @@ def render_tekliflerim_page() -> None:
     }
 
     st.dataframe(table_data, use_container_width=True, hide_index=False)
+
+    # Standardization section
+    st.divider()
+    st.subheader("🔄 Kayıtları Standardize Et")
+    st.info(
+        "Bu işlem mevcut kayıtlardaki firma adlarını (Title Case) ve para birimlerini (BÜYÜK HARF) "
+        "standart formata çevirir. Örn: 'PAKSAN' → 'Paksan', 'Eur' → 'EUR'"
+    )
+    if st.button("Mevcut Kayıtları Standardize Et", type="primary"):
+        with st.spinner("Kayıtlar standardize ediliyor..."):
+            updated_count = standardize_existing_records()
+        if updated_count > 0:
+            st.success(f"✅ {updated_count} kayıt standardize edildi!")
+            st.rerun()
+        else:
+            st.info("Tüm kayıtlar zaten standart formatta.")
 
     # Reset database section
     st.divider()
