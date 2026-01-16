@@ -16,7 +16,7 @@ LOG_PATH = "teklif_listeleme.log"
 OFFER_FOLDER_PATTERN = re.compile(r"teklif", re.IGNORECASE)
 
 FIRM_PATTERNS = [
-    re.compile(r"(?:Firma|Şirket|Müşteri|Kurum|Kuruluş)\s*[:\-]?\s*(.+)", re.IGNORECASE),
+    re.compile(r"(?:Firma\s*Adı|Firma|Şirket|Müşteri|Kurum|Kuruluş)\s*[:\-]?\s*(.+)", re.IGNORECASE),
     re.compile(r"(.+?(?:A\.Ş\.|A\.S\.|Ltd\.?\s*Şti\.?|San\.|Tic\.))", re.IGNORECASE),
 ]
 
@@ -31,10 +31,10 @@ SUBJECT_PATTERNS = [
 
 AMOUNT_PATTERNS = [
     re.compile(
-        r"(?:Toplam\s*Tutar|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*([\d\.\,]+)\s*(TL|₺|USD|EUR)?",
+        r"(?:Toplam\s*Tutar|Toplam|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*([\d\.\,]+)\s*(€|TL|₺|USD|EUR|euro)?",
         re.IGNORECASE,
     ),
-    re.compile(r"([\d\.\,]+)\s*(TL|₺|USD|EUR)", re.IGNORECASE),
+    re.compile(r"([\d\.\,]+)\s*(€|TL|₺|USD|EUR|euro)", re.IGNORECASE),
 ]
 
 OFFER_KEYWORD_PATTERN = re.compile(r"\bteklif\b", re.IGNORECASE)
@@ -132,7 +132,10 @@ def extract_field(patterns: list[re.Pattern], text: str) -> str:
         match = pattern.search(text)
         if match:
             value = match.group(1).strip()
+            # Split by newline or common field separators
             value = re.split(r"\n|\r", value)[0].strip()
+            # Remove trailing noise like "Referansınız", "Teklif No", etc.
+            value = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", value, flags=re.IGNORECASE)[0].strip()
             return value
     return ""
 
@@ -172,6 +175,12 @@ def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, s
         parts = normalized.split(".")
         normalized = "".join(parts[:-1]) + "." + parts[-1]
     try:
+        # Normalize currency symbols
+        if currency:
+            if currency in ("€", "euro"):
+                currency = "EUR"
+            elif currency == "₺":
+                currency = "TL"
         return float(normalized), currency
     except ValueError:
         return None, None
