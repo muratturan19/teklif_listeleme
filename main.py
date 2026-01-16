@@ -297,13 +297,23 @@ def extract_amount_from_pages(pages_text: list[str]) -> tuple[float | None, str 
     return None, None
 
 
-def looks_like_offer(pages_text: list[str], subject: str, amount: float | None) -> bool:
-    # Accept if we found subject OR amount (more lenient)
-    if subject or amount is not None:
-        return True
-    # Otherwise check for "teklif" keyword or reasonable text length
-    full_text = "\n".join(pages_text)
-    return bool(OFFER_KEYWORD_PATTERN.search(full_text)) or len(full_text.strip()) > 100
+def looks_like_offer(firm: str, subject: str, amount: float | None) -> bool:
+    """Check if extracted data looks like a valid offer.
+
+    Requires at least 2 out of 3 fields (firm, subject, amount) to be found.
+    This prevents random PDFs from being classified as offers.
+    """
+    found_fields = 0
+
+    if firm and len(firm) > 2:
+        found_fields += 1
+    if subject and len(subject) > 2:
+        found_fields += 1
+    if amount is not None:
+        found_fields += 1
+
+    # Accept if we found at least 2 out of 3 key fields
+    return found_fields >= 2
 
 
 def parse_offer(path: str) -> OfferRecord | None:
@@ -311,7 +321,7 @@ def parse_offer(path: str) -> OfferRecord | None:
     firm = extract_firm(pages_text)
     subject = extract_subject(pages_text)
     amount, currency = extract_amount_from_pages(pages_text)
-    if not looks_like_offer(pages_text, subject, amount):
+    if not looks_like_offer(firm, subject, amount):
         return None
     return OfferRecord(
         file_path=path,
@@ -447,25 +457,66 @@ def iter_offer_folders(root_folder: str) -> Iterable[str]:
 
 
 def scan_company_offer_pdfs(root_folder: str) -> list[str]:
-    """Scan for PDF files in offer folders.
+    """Scan for PDF files in offer folders at depths 0-2.
 
-    Works in two modes:
-    1. If root_folder itself contains PDFs, scan it directly
-    2. Otherwise, look for company folders with 'teklif' subfolders
+    Searches for folders matching 'teklif*' pattern (case-insensitive)
+    at 0, 1, and 2 levels deep within root_folder, and scans PDFs only
+    in those matched folders.
+
+    Example:
+      E:/DELTA/Teklifler (depth 0)
+      E:/DELTA/FirmaAdi/Teklifler (depth 1)
+      E:/DELTA/FirmaAdi/Subdir/Teklifler (depth 2)
     """
     pdf_files: list[str] = []
 
-    # First, check if root_folder itself has PDFs (direct scan mode)
-    direct_pdfs = walk_pdf_files(root_folder)
-    if direct_pdfs:
-        logging.info("Direkt tarama: %s içinde %s PDF bulundu.", root_folder, len(direct_pdfs))
-        return direct_pdfs
+    if not os.path.isdir(root_folder):
+        return pdf_files
 
-    # Otherwise, scan for company folders with offer subfolders
-    for offers_folder in iter_offer_folders(root_folder):
-        pdf_files.extend(walk_pdf_files(offers_folder))
+    def find_teklif_folders(base_path: str, current_depth: int, max_depth: int = 2) -> list[str]:
+        """Recursively find folders matching teklif pattern up to max_depth."""
+        teklif_folders = []
 
-    logging.info("Klasör yapısı taraması: %s içinde %s PDF bulundu.", root_folder, len(pdf_files))
+        if current_depth > max_depth:
+            return teklif_folders
+
+        try:
+            entries = os.listdir(base_path)
+        except (PermissionError, OSError):
+            return teklif_folders
+
+        for entry in entries:
+            entry_path = os.path.join(base_path, entry)
+
+            if not os.path.isdir(entry_path):
+                continue
+
+            # Check if this folder matches the teklif pattern
+            if is_offer_folder(entry):
+                logging.info("Teklif klasörü bulundu (seviye %d): %s", current_depth, entry_path)
+                teklif_folders.append(entry_path)
+
+            # Continue searching deeper (even if current folder matched)
+            if current_depth < max_depth:
+                teklif_folders.extend(find_teklif_folders(entry_path, current_depth + 1, max_depth))
+
+        return teklif_folders
+
+    # Check if root_folder itself matches teklif pattern (depth 0)
+    if is_offer_folder(os.path.basename(root_folder)):
+        logging.info("Teklif klasörü bulundu (seviye 0): %s", root_folder)
+        teklif_folders = [root_folder]
+    else:
+        # Search subdirectories at depths 1 and 2
+        teklif_folders = find_teklif_folders(root_folder, 1, 2)
+
+    # Scan PDFs in each teklif folder
+    for teklif_folder in teklif_folders:
+        pdfs_in_folder = walk_pdf_files(teklif_folder)
+        pdf_files.extend(pdfs_in_folder)
+        logging.info("  → %s PDF bulundu: %s", len(pdfs_in_folder), teklif_folder)
+
+    logging.info("Toplam %s teklif klasöründe %s PDF bulundu.", len(teklif_folders), len(pdf_files))
     return pdf_files
 
 
