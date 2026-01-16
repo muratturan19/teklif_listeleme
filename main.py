@@ -170,18 +170,45 @@ def extract_subject(pages_text: list[str]) -> str:
 
 
 def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, str | None]:
-    normalized = raw_amount.replace(",", ".")
-    if normalized.count(".") > 1:
-        parts = normalized.split(".")
-        normalized = "".join(parts[:-1]) + "." + parts[-1]
+    # Turkish format: 27.560,50 or 27.560 (dot=thousands, comma=decimal)
+    # English format: 27,560.50 or 27.560 (comma=thousands, dot=decimal)
+
+    # If both comma and dot exist, determine which is decimal separator
+    if "," in raw_amount and "." in raw_amount:
+        # Check which comes last (that's the decimal separator)
+        last_comma_pos = raw_amount.rfind(",")
+        last_dot_pos = raw_amount.rfind(".")
+        if last_comma_pos > last_dot_pos:
+            # Turkish: dot=thousands, comma=decimal (e.g., 1.234,56)
+            normalized = raw_amount.replace(".", "").replace(",", ".")
+        else:
+            # English: comma=thousands, dot=decimal (e.g., 1,234.56)
+            normalized = raw_amount.replace(",", "")
+    elif "," in raw_amount:
+        # Only comma - assume Turkish decimal separator (e.g., 1234,56)
+        normalized = raw_amount.replace(",", ".")
+    elif "." in raw_amount:
+        # Only dot - check if it's thousands or decimal separator
+        parts = raw_amount.split(".")
+        # If last part has exactly 3 digits, it's likely thousands separator (e.g., 27.560)
+        if len(parts) > 1 and len(parts[-1]) == 3:
+            # Turkish thousands separator (e.g., 27.560 = 27560)
+            normalized = raw_amount.replace(".", "")
+        else:
+            # Decimal separator (e.g., 27.5 or 27.56)
+            normalized = raw_amount
+    else:
+        normalized = raw_amount
+
     try:
+        amount = float(normalized)
         # Normalize currency symbols
         if currency:
             if currency in ("€", "euro"):
                 currency = "EUR"
             elif currency == "₺":
                 currency = "TL"
-        return float(normalized), currency
+        return amount, currency
     except ValueError:
         return None, None
 
