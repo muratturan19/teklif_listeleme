@@ -506,6 +506,23 @@ def render_home_page() -> None:
     if "selected_indices" not in st.session_state:
         st.session_state.selected_indices = []
 
+    # Database management section
+    with st.expander("🗑️ Veritabanı Yönetimi"):
+        offers_count = len(load_offers())
+        st.write(f"**Veritabanında {offers_count} teklif var**")
+
+        if offers_count > 0:
+            st.warning("⚠️ Veritabanını sıfırlamak tüm kayıtlı teklifleri silecektir!")
+            confirm_reset = st.checkbox("Veritabanını sıfırlamayı onaylıyorum", key="confirm_reset_home")
+            if st.button("🗑️ Veritabanını Sıfırla", disabled=not confirm_reset, type="secondary"):
+                reset_db()
+                st.success("✅ Veritabanı temizlendi!")
+                st.rerun()
+        else:
+            st.info("Veritabanı zaten boş.")
+
+    st.divider()
+
     # Folder scanning section
     st.subheader("Klasör Tara")
 
