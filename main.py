@@ -156,25 +156,30 @@ def extract_firm(pages_text: list[str]) -> str:
     for i, line in enumerate(lines[:20]):
         if re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]", line, re.IGNORECASE):
             # Found the firm label, extract value from this line or next line
+            logging.debug(f"Firma etiketi bulundu: {line}")
             # Try to get firm name from same line after colon
             match = re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
             if match:
                 firm = match.group(1).strip()
+                logging.debug(f"Aynı satırdan firma çıkartıldı (ham): {firm}")
                 # Clean up trailing noise
                 firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
-                if firm:
+                logging.debug(f"Temizlenmiş firma: {firm}")
+                if firm and len(firm) > 2:  # Reject very short firms
                     return firm
             # If not found on same line, check next line
             if i + 1 < len(lines):
                 firm = lines[i + 1].strip()
+                logging.debug(f"Sonraki satırdan firma çıkartıldı: {firm}")
                 firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
-                if firm:
+                if firm and len(firm) > 2:
                     return firm
 
     # Fallback to header block extraction
     header_block = "\n".join(lines[:12])
     firm = extract_field(FIRM_PATTERNS, header_block)
-    if firm:
+    if firm and len(firm) > 2:
+        logging.debug(f"Header block'tan firma: {firm}")
         return firm
 
     # Try greetings pattern
@@ -185,7 +190,11 @@ def extract_firm(pages_text: list[str]) -> str:
         candidate = match.group(1).strip()
         if re.search(r"\b(hanım|bey)\b", candidate, re.IGNORECASE):
             continue
-        return candidate
+        if len(candidate) > 2:
+            logging.debug(f"Greetings pattern'den firma: {candidate}")
+            return candidate
+
+    logging.warning("Firma adı bulunamadı. İlk 5 satır: " + str(lines[:5]))
     return ""
 
 
