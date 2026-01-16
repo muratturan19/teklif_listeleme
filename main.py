@@ -149,77 +149,87 @@ def extract_field(patterns: list[re.Pattern], text: str) -> str:
 def extract_firm(pages_text: list[str]) -> str:
     if not pages_text:
         return ""
-    first_page = pages_text[0]
-    lines = [line.strip() for line in first_page.splitlines() if line.strip()]
 
-    # First, try to find "Firma Adı:" or similar in first 20 lines
-    for i, line in enumerate(lines[:20]):
-        if re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]", line, re.IGNORECASE):
-            # Found the firm label, extract value from this line or next line
-            logging.debug(f"Firma etiketi bulundu: {line}")
-            # Try to get firm name from same line after colon
-            match = re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
-            if match:
-                firm = match.group(1).strip()
-                logging.debug(f"Aynı satırdan firma çıkartıldı (ham): {firm}")
-                # Clean up trailing noise
-                firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
-                logging.debug(f"Temizlenmiş firma: {firm}")
-                if firm and len(firm) > 2:  # Reject very short firms
-                    return firm
-            # If not found on same line, check next line
-            if i + 1 < len(lines):
-                firm = lines[i + 1].strip()
-                logging.debug(f"Sonraki satırdan firma çıkartıldı: {firm}")
-                firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
-                if firm and len(firm) > 2:
-                    return firm
+    # Try first 3 pages (in case first page is cover image)
+    for page_idx, page_text in enumerate(pages_text[:3]):
+        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+        if not lines:
+            continue  # Skip empty pages
 
-    # Fallback to header block extraction
-    header_block = "\n".join(lines[:12])
-    firm = extract_field(FIRM_PATTERNS, header_block)
-    if firm and len(firm) > 2:
-        logging.debug(f"Header block'tan firma: {firm}")
-        return firm
+        # Try to find "Firma Adı:" or similar in first 20 lines
+        for i, line in enumerate(lines[:20]):
+            if re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]", line, re.IGNORECASE):
+                logging.debug(f"Firma etiketi bulundu (sayfa {page_idx + 1}): {line}")
+                # Try to get firm name from same line after colon
+                match = re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
+                if match:
+                    firm = match.group(1).strip()
+                    logging.debug(f"Aynı satırdan firma çıkartıldı (ham): {firm}")
+                    # Clean up trailing noise
+                    firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
+                    logging.debug(f"Temizlenmiş firma: {firm}")
+                    if firm and len(firm) > 2:
+                        return firm
+                # If not found on same line, check next line
+                if i + 1 < len(lines):
+                    firm = lines[i + 1].strip()
+                    logging.debug(f"Sonraki satırdan firma çıkartıldı: {firm}")
+                    firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
+                    if firm and len(firm) > 2:
+                        return firm
 
-    # Try greetings pattern
-    for line in lines[:15]:
-        match = GREETINGS_PATTERN.search(line)
-        if not match:
-            continue
-        candidate = match.group(1).strip()
-        if re.search(r"\b(hanım|bey)\b", candidate, re.IGNORECASE):
-            continue
-        if len(candidate) > 2:
-            logging.debug(f"Greetings pattern'den firma: {candidate}")
-            return candidate
+        # Fallback to header block extraction for this page
+        header_block = "\n".join(lines[:12])
+        firm = extract_field(FIRM_PATTERNS, header_block)
+        if firm and len(firm) > 2:
+            logging.debug(f"Header block'tan firma (sayfa {page_idx + 1}): {firm}")
+            return firm
 
-    logging.warning("Firma adı bulunamadı. İlk 5 satır: " + str(lines[:5]))
+        # Try greetings pattern
+        for line in lines[:15]:
+            match = GREETINGS_PATTERN.search(line)
+            if not match:
+                continue
+            candidate = match.group(1).strip()
+            if re.search(r"\b(hanım|bey)\b", candidate, re.IGNORECASE):
+                continue
+            if len(candidate) > 2:
+                logging.debug(f"Greetings pattern'den firma (sayfa {page_idx + 1}): {candidate}")
+                return candidate
+
+    logging.warning("Firma adı bulunamadı. İlk 3 sayfa kontrol edildi.")
     return ""
 
 
 def extract_subject(pages_text: list[str]) -> str:
     if not pages_text:
         return ""
-    first_page = pages_text[0]
-    lines = [line.strip() for line in first_page.splitlines() if line.strip()]
 
-    # Try to find "Konu:" label in first 25 lines
-    for i, line in enumerate(lines[:25]):
-        if re.search(r"(?:Konu|Teklif\s*Konusu)\s*[:\-]", line, re.IGNORECASE):
-            # Extract subject from same line or next line
-            match = re.search(r"(?:Konu|Teklif\s*Konusu)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
-            if match:
-                subject = match.group(1).strip()
-                # Don't truncate subject too early
-                return subject[:200]  # Max 200 chars
-            # Check next line if not on same line
-            if i + 1 < len(lines):
-                return lines[i + 1].strip()[:200]
+    # Try first 3 pages (in case first page is cover image)
+    for page_idx, page_text in enumerate(pages_text[:3]):
+        lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+        if not lines:
+            continue  # Skip empty pages
 
-    # Fallback to header block
-    header_block = "\n".join(lines[:18])
-    return extract_field(SUBJECT_PATTERNS, header_block)
+        # Try to find "Konu:" label in first 25 lines
+        for i, line in enumerate(lines[:25]):
+            if re.search(r"(?:Konu|Teklif\s*Konusu)\s*[:\-]", line, re.IGNORECASE):
+                # Extract subject from same line or next line
+                match = re.search(r"(?:Konu|Teklif\s*Konusu)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
+                if match:
+                    subject = match.group(1).strip()
+                    return subject[:200]  # Max 200 chars
+                # Check next line if not on same line
+                if i + 1 < len(lines):
+                    return lines[i + 1].strip()[:200]
+
+        # Fallback to header block
+        header_block = "\n".join(lines[:18])
+        subject = extract_field(SUBJECT_PATTERNS, header_block)
+        if subject:
+            return subject
+
+    return ""
 
 
 def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, str | None]:
