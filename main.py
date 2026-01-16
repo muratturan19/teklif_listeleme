@@ -5,7 +5,7 @@ import sqlite3
 import tkinter as tk
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
 
 import streamlit as st
 from PyPDF2 import PdfReader
@@ -13,7 +13,7 @@ from tkinter import filedialog
 
 DB_PATH = "teklifler.db"
 LOG_PATH = "teklif_listeleme.log"
-OFFERS_FOLDER_NAME = "Teklifler"
+OFFER_FOLDER_PATTERN = re.compile(r"teklif", re.IGNORECASE)
 
 FIRM_PATTERNS = [
     re.compile(r"(?:Firma|Şirket|Müşteri|Kurum|Kuruluş)\s*[:\-]?\s*(.+)", re.IGNORECASE),
@@ -78,27 +78,47 @@ def reset_db() -> None:
     init_db()
 
 
+def extract_page_text(page, path: str, page_number: int) -> str:
+    try:
+        return sanitize_text(page.extract_text() or "")
+    except Exception as exc:  # noqa: BLE001
+        logging.warning(
+            "Sayfa metni okunamadı: %s (sayfa %s): %s",
+            path,
+            page_number,
+            sanitize_text(str(exc)),
+        )
+        return ""
+
+
+def load_pdf_reader(path: str) -> PdfReader | None:
+    try:
+        return PdfReader(path, strict=False)
+    except Exception as exc:  # noqa: BLE001
+        logging.warning("PDF okunamadı: %s (%s)", path, sanitize_text(str(exc)))
+        return None
+
+
 def extract_text_from_pdf(path: str) -> str:
-    reader = PdfReader(path)
+    reader = load_pdf_reader(path)
+    if reader is None:
+        return ""
     chunks: list[str] = []
-    for page in reader.pages:
-        text = sanitize_text(page.extract_text() or "")
+    for index, page in enumerate(reader.pages, start=1):
+        text = extract_page_text(page, path, index)
         if text.strip():
             chunks.append(text)
     return "\n".join(chunks)
 
 
 def extract_pages_from_pdf(path: str) -> list[str]:
-    reader = PdfReader(path)
+    reader = load_pdf_reader(path)
+    if reader is None:
+        return []
     chunks: list[str] = []
-    for page_num, page in enumerate(reader.pages, start=1):
-        try:
-            text = page.extract_text() or ""
-            text = sanitize_text(text)
-            chunks.append(text)
-        except Exception as exc:
-            logging.warning(f"Sayfa {page_num} okunamadı ({path}): {exc}")
-            chunks.append("")
+    for index, page in enumerate(reader.pages, start=1):
+        text = extract_page_text(page, path, index)
+        chunks.append(text)
     return chunks
 
 
@@ -249,6 +269,10 @@ def walk_pdf_files(folder: str) -> list[str]:
     return pdf_files
 
 
+def is_offer_folder(name: str) -> bool:
+    return bool(OFFER_FOLDER_PATTERN.search(name))
+
+
 def iter_offer_folders(root_folder: str) -> Iterable[str]:
     if not os.path.isdir(root_folder):
         return []
@@ -258,27 +282,40 @@ def iter_offer_folders(root_folder: str) -> Iterable[str]:
             continue
         offers_folder = None
         for sub_entry in os.listdir(company_path):
-            if sub_entry.lower() == OFFERS_FOLDER_NAME.lower():
+            if is_offer_folder(sub_entry):
                 offers_folder = os.path.join(company_path, sub_entry)
                 break
         if offers_folder and os.path.isdir(offers_folder):
+            logging.info("Teklif klasörü bulundu: %s", offers_folder)
             yield offers_folder
+        else:
+            logging.info("Teklif klasörü bulunamadı: %s", company_path)
 
 
 def scan_company_offer_pdfs(root_folder: str) -> list[str]:
     pdf_files: list[str] = []
     for offers_folder in iter_offer_folders(root_folder):
         pdf_files.extend(walk_pdf_files(offers_folder))
+    logging.info("Tarama tamamlandı: %s içinde %s PDF bulundu.", root_folder, len(pdf_files))
     return pdf_files
 
 
-def process_files(paths: list[str], debug_mode: bool = False) -> tuple[int, int, list[str], list[dict]]:
+def process_files(
+    paths: list[str],
+    debug_mode: bool = False,
+    progress_callback: Callable[[float], None] | None = None,
+    status_callback: Callable[[str], None] | None = None,
+) -> tuple[int, int, list[str], list[dict]]:
     processed = 0
     skipped = 0
     errors: list[str] = []
     debug_info: list[dict] = []
+    total = len(paths)
 
-    for path in paths:
+    for index, path in enumerate(paths, start=1):
+        if status_callback:
+            status_callback(f"{index}/{total} • {os.path.basename(path)} işleniyor...")
+
         try:
             pages_text = extract_pages_from_pdf(path)
             full_text = "\n".join(pages_text)
@@ -314,7 +351,23 @@ def process_files(paths: list[str], debug_mode: bool = False) -> tuple[int, int,
             error_text = sanitize_text(str(exc))
             errors.append(f"{path} okunamadı: {error_text}")
 
+        if progress_callback:
+            progress_callback(index / total if total else 1.0)
+
     return processed, skipped, errors, debug_info
+
+
+def read_log_tail(max_lines: int = 200) -> str:
+    if not os.path.exists(LOG_PATH):
+        return "Log dosyası henüz oluşmadı."
+    with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as log_file:
+        lines = log_file.readlines()
+    return "".join(lines[-max_lines:]) or "Log dosyası boş."
+
+
+def render_backend_log() -> None:
+    with st.expander("Backend Logu"):
+        st.code(read_log_tail(), language="text")
 
 
 def render_upload_panel() -> None:
@@ -335,8 +388,15 @@ def render_upload_panel() -> None:
             with open(temp_path, "wb") as temp_file:
                 temp_file.write(file.read())
             paths.append(temp_path)
-        with st.spinner("PDF'ler işleniyor..."):
-            processed, skipped, errors, debug_info = process_files(paths, debug_mode)
+        progress_bar = st.progress(0)
+        status_area = st.empty()
+        processed, skipped, errors, debug_info = process_files(
+            paths,
+            debug_mode=debug_mode,
+            progress_callback=progress_bar.progress,
+            status_callback=status_area.info,
+        )
+        status_area.success("Tarama tamamlandı.")
         st.success(f"{processed} teklif işlendi, {skipped} dosya teklif olarak algılanmadı.")
         if errors:
             st.warning("\n".join(errors))
@@ -348,13 +408,20 @@ def render_upload_panel() -> None:
                     st.write(f"**Konu:** {info['subject']}")
                     st.write(f"**Tutar:** {info['amount']}")
                     st.text_area("Metin Önizleme", info['text_preview'], height=200)
+        render_backend_log()
 
 
 def render_folder_panel() -> None:
     st.subheader("Klasör Tara")
     st.caption(
-        "Seçilen klasörün içindeki firma klasörlerinde sadece 'Teklifler' alt klasörü taranır."
+        "Seçilen klasörün içindeki firma klasörlerinde adı 'teklif' geçen alt klasörler taranır."
     )
+
+    def choose_scan_folder() -> None:
+        selected = pick_folder()
+        if selected:
+            st.session_state.scan_folder_path = selected
+
     if "scan_folder_path" not in st.session_state:
         st.session_state.scan_folder_path = ""
     input_col, browse_col = st.columns([4, 1])
@@ -364,23 +431,28 @@ def render_folder_panel() -> None:
             key="scan_folder_path",
         )
     with browse_col:
-        if st.button("Gözat"):
-            selected = pick_folder()
-            if selected:
-                st.session_state.scan_folder_path = selected
-                st.rerun()
+        st.button("Gözat", on_click=choose_scan_folder)
     folder = st.session_state.scan_folder_path
     debug_mode = st.checkbox("Debug Modu (PDF'den çıkarılan metni göster)", key="folder_debug")
     if st.button("Klasörü Tara"):
         if not folder:
             st.info("Lütfen bir klasör yolu girin.")
             return
+        logging.info("Klasör taraması başlatıldı: %s", folder)
         pdf_files = scan_company_offer_pdfs(folder)
         if not pdf_files:
-            st.warning("Teklifler klasörlerinde PDF bulunamadı.")
+            st.warning("Teklif klasörlerinde PDF bulunamadı.")
+            render_backend_log()
             return
-        with st.spinner("PDF'ler işleniyor..."):
-            processed, skipped, errors, debug_info = process_files(pdf_files, debug_mode)
+        progress_bar = st.progress(0)
+        status_area = st.empty()
+        processed, skipped, errors, debug_info = process_files(
+            pdf_files,
+            debug_mode=debug_mode,
+            progress_callback=progress_bar.progress,
+            status_callback=status_area.info,
+        )
+        status_area.success("Tarama tamamlandı.")
         st.success(f"{processed} teklif işlendi, {skipped} dosya teklif olarak algılanmadı.")
         if errors:
             st.warning("\n".join(errors))
@@ -394,6 +466,7 @@ def render_folder_panel() -> None:
                     st.text_area("Metin Önizleme", info['text_preview'], height=200, key=f"debug_{info['path']}")
             if len(debug_info) > 10:
                 st.info(f"İlk 10 dosya gösteriliyor. Toplam {len(debug_info)} dosya işlendi.")
+        render_backend_log()
 
 
 def render_offers_table() -> None:
