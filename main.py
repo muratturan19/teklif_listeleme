@@ -31,11 +31,13 @@ SUBJECT_PATTERNS = [
 ]
 
 AMOUNT_PATTERNS = [
+    # Match amount with currency after keywords (require at least 3 digits total)
     re.compile(
-        r"(?:Toplam\s*Tutar|Toplam|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*([\d\.\,]+)\s*(€|TL|₺|USD|EUR|euro)?",
+        r"(?:Toplam\s*(?:Tutar|Fiyat)?|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,]{3,})\s*(€|TL|₺|USD|EUR|euro)?",
         re.IGNORECASE,
     ),
-    re.compile(r"([\d\.\,]+)\s*(€|TL|₺|USD|EUR|euro)", re.IGNORECASE),
+    # Match amount with currency anywhere (require at least 3 digits before currency)
+    re.compile(r"([\d\.\,]{3,})\s*(€|TL|₺|USD|EUR|euro)", re.IGNORECASE),
 ]
 
 OFFER_KEYWORD_PATTERN = re.compile(r"\bteklif\b", re.IGNORECASE)
