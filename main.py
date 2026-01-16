@@ -110,21 +110,25 @@ def standardize_existing_records() -> int:
     updated_count = 0
 
     with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        # Fixed: Use correct column names from schema (firm, currency not firma, para_birimi)
-        cursor.execute("SELECT id, firm, currency FROM teklifler")
+        # Use separate cursors: one for SELECT, one for UPDATE
+        # This prevents cursor conflict when iterating and updating simultaneously
+        select_cursor = conn.cursor()
+        update_cursor = conn.cursor()
 
-        # Iterate directly over cursor for better memory efficiency
-        for record_id, firm, currency in cursor:
+        # Fixed: Use correct column names from schema (firm, currency not firma, para_birimi)
+        select_cursor.execute("SELECT id, firm, currency FROM teklifler")
+
+        # Iterate over SELECT cursor, update with UPDATE cursor
+        for record_id, firm, currency in select_cursor:
             # Standardize firm name
             normalized_firm = normalize_firm_name(firm) if firm else firm
 
             # Standardize currency using helper function
             normalized_currency = normalize_currency(currency)
 
-            # Update if changed
+            # Update if changed (using separate cursor)
             if normalized_firm != firm or normalized_currency != currency:
-                cursor.execute(
+                update_cursor.execute(
                     "UPDATE teklifler SET firm = ?, currency = ? WHERE id = ?",
                     (normalized_firm, normalized_currency, record_id)
                 )
