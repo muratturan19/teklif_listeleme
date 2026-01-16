@@ -563,23 +563,24 @@ def iter_offer_folders(root_folder: str) -> Iterable[str]:
 
 
 def scan_company_offer_pdfs(root_folder: str) -> list[str]:
-    """Scan for PDF files in offer folders at depths 0-2.
+    """Scan for PDF files in offer folders at depths 0-3.
 
     Searches for folders matching 'teklif*' pattern (case-insensitive)
-    at 0, 1, and 2 levels deep within root_folder, and scans PDFs only
+    at 0, 1, 2, and 3 levels deep within root_folder, and scans PDFs only
     in those matched folders.
 
     Example:
       E:/DELTA/Teklifler (depth 0)
       E:/DELTA/FirmaAdi/Teklifler (depth 1)
       E:/DELTA/FirmaAdi/Subdir/Teklifler (depth 2)
+      E:/DELTA/GTip/Soya Yağı/Teklif (depth 3)
     """
     pdf_files: list[str] = []
 
     if not os.path.isdir(root_folder):
         return pdf_files
 
-    def find_teklif_folders(base_path: str, current_depth: int, max_depth: int = 2) -> list[str]:
+    def find_teklif_folders(base_path: str, current_depth: int, max_depth: int = 3) -> list[str]:
         """Recursively find folders matching teklif pattern up to max_depth."""
         teklif_folders = []
 
@@ -613,8 +614,8 @@ def scan_company_offer_pdfs(root_folder: str) -> list[str]:
         logging.info("Teklif klasörü bulundu (seviye 0): %s", root_folder)
         teklif_folders = [root_folder]
     else:
-        # Search subdirectories at depths 1 and 2
-        teklif_folders = find_teklif_folders(root_folder, 1, 2)
+        # Search subdirectories at depths 1, 2, and 3
+        teklif_folders = find_teklif_folders(root_folder, 1, 3)
 
     # Scan PDFs in each teklif folder
     for teklif_folder in teklif_folders:
