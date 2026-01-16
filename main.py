@@ -31,13 +31,14 @@ SUBJECT_PATTERNS = [
 ]
 
 AMOUNT_PATTERNS = [
-    # Match amount with currency after keywords (require at least 3 digits total)
+    # Match amount with currency after keywords (support space-separated thousands)
+    # Example: "1.677 289,00 Euro" or "157.500 €"
     re.compile(
-        r"(?:Toplam\s*(?:Tutar|Fiyat)?|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,]{3,})\s*(€|TL|₺|USD|EUR|euro)?",
+        r"(?:Toplam\s*(?:Tutar|Fiyat)?|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro)",
         re.IGNORECASE,
     ),
-    # Match amount with currency anywhere (require at least 3 digits before currency)
-    re.compile(r"([\d\.\,]{3,})\s*(€|TL|₺|USD|EUR|euro)", re.IGNORECASE),
+    # Match large amounts with currency (minimum 4 characters, support spaces)
+    re.compile(r"([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro)", re.IGNORECASE),
 ]
 
 OFFER_KEYWORD_PATTERN = re.compile(r"\bteklif\b", re.IGNORECASE)
@@ -148,10 +149,33 @@ def extract_firm(pages_text: list[str]) -> str:
         return ""
     first_page = pages_text[0]
     lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+
+    # First, try to find "Firma Adı:" or similar in first 20 lines
+    for i, line in enumerate(lines[:20]):
+        if re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]", line, re.IGNORECASE):
+            # Found the firm label, extract value from this line or next line
+            # Try to get firm name from same line after colon
+            match = re.search(r"(?:Firma\s*Adı|Firma)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
+            if match:
+                firm = match.group(1).strip()
+                # Clean up trailing noise
+                firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
+                if firm:
+                    return firm
+            # If not found on same line, check next line
+            if i + 1 < len(lines):
+                firm = lines[i + 1].strip()
+                firm = re.split(r"\s+(?:Referans|Teklif\s*No|Tarih|Sayfa)", firm, flags=re.IGNORECASE)[0].strip()
+                if firm:
+                    return firm
+
+    # Fallback to header block extraction
     header_block = "\n".join(lines[:12])
     firm = extract_field(FIRM_PATTERNS, header_block)
     if firm:
         return firm
+
+    # Try greetings pattern
     for line in lines[:15]:
         match = GREETINGS_PATTERN.search(line)
         if not match:
@@ -168,13 +192,35 @@ def extract_subject(pages_text: list[str]) -> str:
         return ""
     first_page = pages_text[0]
     lines = [line.strip() for line in first_page.splitlines() if line.strip()]
+
+    # Try to find "Konu:" label in first 25 lines
+    for i, line in enumerate(lines[:25]):
+        if re.search(r"(?:Konu|Teklif\s*Konusu)\s*[:\-]", line, re.IGNORECASE):
+            # Extract subject from same line or next line
+            match = re.search(r"(?:Konu|Teklif\s*Konusu)\s*[:\-]\s*(.+)", line, re.IGNORECASE)
+            if match:
+                subject = match.group(1).strip()
+                # Don't truncate subject too early
+                return subject[:200]  # Max 200 chars
+            # Check next line if not on same line
+            if i + 1 < len(lines):
+                return lines[i + 1].strip()[:200]
+
+    # Fallback to header block
     header_block = "\n".join(lines[:18])
     return extract_field(SUBJECT_PATTERNS, header_block)
 
 
 def parse_amount(raw_amount: str, currency: str | None) -> tuple[float | None, str | None]:
-    # Turkish format: 27.560,50 or 27.560 (dot=thousands, comma=decimal)
+    # Turkish format: 27.560,50 or 27.560 or "1.677 289,00" (dot/space=thousands, comma=decimal)
     # English format: 27,560.50 or 27.560 (comma=thousands, dot=decimal)
+
+    # Remove all spaces first (support formats like "1.677 289,00")
+    raw_amount = raw_amount.replace(" ", "").strip()
+
+    # Reject amounts that are too small (likely noise like "1.00", "2.00")
+    if len(raw_amount.replace(".", "").replace(",", "")) < 3:
+        return None, None
 
     # If both comma and dot exist, determine which is decimal separator
     if "," in raw_amount and "." in raw_amount:
