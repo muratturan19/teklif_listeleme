@@ -6,7 +6,7 @@ import os
 # Add parent directory to path to import main
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PyPDF2 import PdfReader
+from pypdf import PdfReader  # Updated from PyPDF2
 
 def test_pdf(pdf_path: str):
     """Test a single PDF to see what we can extract"""

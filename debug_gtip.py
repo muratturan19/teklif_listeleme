@@ -5,7 +5,7 @@ import os
 import re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from PyPDF2 import PdfReader
+from pypdf import PdfReader  # Updated from PyPDF2
 
 def test_gtip_pdf():
     pdf_path = r"E:\DELTA\GTip\Soya Yağı\Teklif\Proposal_Delta_EN.pdf"
