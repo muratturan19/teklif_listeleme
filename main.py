@@ -41,21 +41,30 @@ SUBJECT_PATTERNS = [
 ]
 
 AMOUNT_PATTERNS = [
-    # Turkish patterns - Match amount with currency after keywords
+    # PRIORITY 1: Sum pattern (most specific - final total in proposals)
+    # Must come first to avoid matching subtotals like "Total Quote"
+    # Example: "Sum                    2.125.400€"
+    re.compile(
+        r"\bSum\s*[:\-]?\s+([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)",
+        re.IGNORECASE,
+    ),
+
+    # PRIORITY 2: Turkish patterns - Total amount with keywords
     # Example: "Toplam Tutar: 1.677 289,00 Euro" or "Teklif Tutarı: 157.500 €"
     re.compile(
-        r"(?:Toplam\s*(?:Tutar|Fiyat)?|Teklif\s*Tutarı|Tutar)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro)",
+        r"(?:Toplam\s*(?:Tutar|Fiyat)?|Teklif\s*Tutarı|Genel\s*Toplam)\s*[:\-]?\s*(?:\([^\)]*\))?\s*([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro)",
         re.IGNORECASE,
     ),
-    # English patterns - Match amount with currency after keywords
-    # Support large whitespace for table formatting: "Sum                    2.125.400€"
-    # Example: "Sum: 1,925.000€" or "Total Price: 1.925.000€" or "Grand Total: 1,925.000€"
+
+    # PRIORITY 3: English patterns - Grand Total (avoid "Total Quote" which is subtotal)
+    # Example: "Grand Total: 1,925.000€" or "Total Price: 1.925.000€"
     re.compile(
-        r"(?:Sum|Total\s*(?:Price|Quote|Cost|Amount)?|Grand\s*Total)\s*[:\-]?\s*(?:\([^\)]*\))?\s+([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)",
+        r"(?:Grand\s*Total|Total\s*(?:Price|Amount|Cost))\s*[:\-]?\s*(?:\([^\)]*\))?\s+([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)",
         re.IGNORECASE,
     ),
-    # Match large amounts with currency (minimum 4 characters, support spaces)
-    # This catches amounts without keywords
+
+    # FALLBACK: Match large amounts with currency (minimum 4 characters)
+    # This catches amounts without keywords - use only as last resort
     re.compile(r"([\d\.\,\s]{4,}?)\s*(€|TL|₺|USD|EUR|euro|\$)", re.IGNORECASE),
 ]
 
@@ -920,16 +929,62 @@ def render_tekliflerim_page() -> None:
 
     st.divider()
 
-    # Display offers as dataframe
-    table_data = {
-        "Firma": [o.firm for o in offers],
-        "Konu": [o.subject for o in offers],
-        "Tutar": [f"{o.amount:,.2f}" if o.amount is not None else "" for o in offers],
-        "Para Birimi": [o.currency or "" for o in offers],
-        "Dosya": [os.path.basename(o.file_path) for o in offers],
-    }
+    # Display offers as editable dataframe
+    st.subheader("✏️ Teklifler (Düzenlenebilir)")
+    st.info("💡 Tablodaki değerleri doğrudan düzenleyebilirsiniz. Değişiklikleri kaydetmek için 'Değişiklikleri Kaydet' butonuna basın.")
 
-    st.dataframe(table_data, use_container_width=True, hide_index=False)
+    # Prepare editable dataframe with IDs
+    df_edit = pd.DataFrame([
+        {
+            "ID": o.file_path,  # Use file_path as unique ID
+            "Firma": o.firm or "",
+            "Konu": o.subject or "",
+            "Tutar": float(o.amount) if o.amount is not None else 0.0,
+            "Para Birimi": o.currency or "EUR",
+            "Dosya": os.path.basename(o.file_path),
+        }
+        for o in offers
+    ])
+
+    # Editable data editor
+    edited_df = st.data_editor(
+        df_edit,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "ID": None,  # Hide ID column
+            "Firma": st.column_config.TextColumn("Firma", width="medium", required=True),
+            "Konu": st.column_config.TextColumn("Konu", width="large"),
+            "Tutar": st.column_config.NumberColumn("Tutar", format="%.2f", min_value=0.0),
+            "Para Birimi": st.column_config.SelectboxColumn(
+                "Para Birimi",
+                options=["EUR", "TL", "USD", "GBP"],
+                default="EUR",
+            ),
+            "Dosya": st.column_config.TextColumn("Dosya", disabled=True),
+        },
+        num_rows="fixed",
+    )
+
+    # Save changes button
+    if st.button("💾 Değişiklikleri Kaydet", type="primary"):
+        with st.spinner("Değişiklikler kaydediliyor..."):
+            updated_count = 0
+            with sqlite3.connect(DB_PATH) as conn:
+                for idx, row in edited_df.iterrows():
+                    file_path = row["ID"]
+                    conn.execute(
+                        """
+                        UPDATE teklifler
+                        SET firm = ?, subject = ?, amount = ?, currency = ?
+                        WHERE file_path = ?
+                        """,
+                        (row["Firma"], row["Konu"], row["Tutar"], row["Para Birimi"], file_path)
+                    )
+                    updated_count += 1
+                conn.commit()
+        st.success(f"✅ {updated_count} kayıt güncellendi!")
+        st.rerun()
 
     # Standardization section
     st.divider()
