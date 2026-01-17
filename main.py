@@ -9,7 +9,7 @@ from typing import Callable, Iterable
 
 import pandas as pd
 import streamlit as st
-from PyPDF2 import PdfReader
+from pypdf import PdfReader  # Updated from PyPDF2 to pypdf for better encoding support
 from tkinter import filedialog
 
 DB_PATH = "teklifler.db"
